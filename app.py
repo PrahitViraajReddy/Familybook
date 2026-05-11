@@ -1191,7 +1191,7 @@ def _step1():
         full_name = st.text_input("Full Name *",    value=d.get("full_name", ""),    placeholder="")
         email     = st.text_input("Email *",        value=d.get("email", ""),        placeholder="")
         pass1     = st.text_input("Password *",     type="password",                 placeholder="")
-        pass2     = st.text_input("Confirm Pwd *",  type="password",                 placeholder="")
+        pass2     = st.text_input("Confirm Password *",  type="password",                 placeholder="")
         dob_val   = ensure_dob(d["dob"]) if d.get("dob") else None
         dob       = st.date_input("Date of Birth *", value=dob_val, min_value=date(1900, 1, 1), max_value=date.today())
         dynasty   = st.text_input("Dynasty Name *", value=d.get("dynasty_name", ""), placeholder="")
@@ -3557,7 +3557,7 @@ def _settings_tab(uid):
     with st.form("pass_form"):
         op  = st.text_input("Current Password", type="password")
         np1 = st.text_input("New Password",     type="password")
-        np2 = st.text_input("Confirm New Pwd",  type="password")
+        np2 = st.text_input("Confirm New Password",  type="password")
         if st.form_submit_button("🔐 Update Password"):
             if not check_pw(op, u["password"]): set_msg("Current password wrong.", "error")
             elif len(np1) < 8: set_msg("New password ≥ 8 chars.", "error")
