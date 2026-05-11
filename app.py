@@ -963,7 +963,7 @@ header[data-testid="stHeader"]{background:transparent!important;}
 .diary-entry:hover{border-color:var(--gold);}
 .diary-date{font-size:.72rem;text-transform:uppercase;letter-spacing:1.2px;color:var(--mist);margin-bottom:.3rem;}
 .diary-title{font-family:'Cormorant Garamond',serif;font-size:1.2rem;font-weight:700;color:var(--bark);margin-bottom:.4rem;}
-.diary-preview{font-size:.86rem;color:#555;line-height:1.55;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}
+.diary-preview{font-size:.86rem;color:var(--mist);line-height:1.55;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}
 .diary-mood{font-size:1.2rem;float:right;margin-left:.5rem;}
 .diary-full-content{font-size:.92rem;line-height:1.75;color:var(--ink);white-space:pre-wrap;}
 
@@ -977,7 +977,7 @@ header[data-testid="stHeader"]{background:transparent!important;}
 .tl-event-type{font-size:.7rem;text-transform:uppercase;letter-spacing:1.2px;color:var(--mist);margin-bottom:.2rem;}
 .tl-title{font-family:'Cormorant Garamond',serif;font-size:1.1rem;font-weight:700;color:var(--bark);}
 .tl-date{font-size:.78rem;color:var(--mist);}
-.tl-desc{font-size:.84rem;color:#555;margin-top:.4rem;line-height:1.5;}
+.tl-desc{font-size:.84rem;color:var(--mist);margin-top:.4rem;line-height:1.5;}
 .tl-loc{font-size:.76rem;color:var(--mist);margin-top:.3rem;}
 
 /* Photo upload zone */
@@ -993,6 +993,39 @@ header[data-testid="stHeader"]{background:transparent!important;}
 
 /* Slideshow */
 .slideshow-img{width:100%;max-height:500px;object-fit:contain;border-radius:12px;background:#1a1a1a;}
+
+@media (prefers-color-scheme: dark) {
+  :root{
+    --cream:#1A1612; --parchment:#2A2320; --bark:#E8C99A; --moss:#7DBF9E;
+    --gold:#E8B84B; --rust:#E8845A; --ink:#F0EBE1; --mist:#A8B8AA;
+    --shadow:rgba(0,0,0,0.40); --card-bg:#242018;
+  }
+  html,body,[data-testid="stAppViewContainer"]{background:var(--cream)!important;color:var(--ink)!important;}
+  .card,.stat-card,.feed-card,.dp-section,.member-card,.member-list-row,
+  .album-card,.diary-entry,.tl-card,.filter-strip,.profile-modal,
+  .search-result,.rel-chip,.dp-rel-card{background:var(--card-bg)!important;border-color:var(--parchment)!important;}
+  .member-list-row:hover{background:#2E2820!important;}
+  .photo-upload-zone{background:#2A2218!important;border-color:var(--gold)!important;}
+  .badge-gold{background:#3A2E10!important;color:#E8C47A!important;border-color:#8A6A20!important;}
+  .badge-green{background:#0F2A1A!important;color:#7DBF9E!important;border-color:#2A6A4A!important;}
+  .badge-blue{background:#0F1A3A!important;color:#7A9AE8!important;border-color:#2A4AAA!important;}
+  .badge-purple{background:#1A0F3A!important;color:#A87AE8!important;border-color:#5A2AAA!important;}
+  .badge-red{background:#3A0F0F!important;color:#E87A7A!important;border-color:#AA2A2A!important;}
+  .msg-success{background:#0F2A1A!important;border-color:var(--moss)!important;color:#7DBF9E!important;}
+  .msg-error{background:#2A0F0F!important;border-color:#C0392B!important;color:#E87A7A!important;}
+  .msg-info{background:#0F1A3A!important;border-color:#3B6ECA!important;color:#7A9AE8!important;}
+  .fancy-divider{background:linear-gradient(to right,transparent,var(--parchment),transparent)!important;}
+  .diary-preview,.tl-desc{color:var(--mist)!important;}
+  .dp-stat-num,.stat-num,.card-title,.dp-section-title,.member-card-name,
+  .member-list-name,.diary-title,.tl-title,.album-title,.feed-title,
+  .dp-hero-name,.namaste-title,.dp-rel-name,.rel-type{color:var(--bark)!important;}
+  .tl-dot{border-color:var(--card-bg)!important;}
+  [data-testid="stButton"]>button{background:var(--card-bg)!important;color:var(--ink)!important;border-color:var(--parchment)!important;}
+  [data-testid="stButton"]>button[kind="primary"]{background:linear-gradient(135deg,var(--bark),var(--moss))!important;color:#1A1612!important;}
+  [data-baseweb="tab-list"]{border-color:var(--parchment)!important;}
+  [data-testid="stTextInput"] input,[data-testid="stTextArea"] textarea,
+  [data-baseweb="select"] div{background:var(--card-bg)!important;color:var(--ink)!important;border-color:var(--parchment)!important;}
+}
 </style>
 """, unsafe_allow_html=True)
 
