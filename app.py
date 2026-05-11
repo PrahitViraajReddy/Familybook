@@ -1215,7 +1215,6 @@ def _step1():
                 if pass1 != pass2: errs.append("Passwords don't match")
                 if not dynasty.strip(): errs.append("Dynasty Name required")
                 if dob is None: errs.append("Date of birth required")
-                elif calc_age(dob) < 5: errs.append("Invalid date of birth")
                 if errs:
                     set_msg("• " + "<br>• ".join(errs), "error")
                 elif db_ok() and get_user_email(email):
