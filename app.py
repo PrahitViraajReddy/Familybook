@@ -358,6 +358,7 @@ def q_exec_return(sql, params=()):
             raise
 
 
+@st.cache_data(ttl=30, show_spinner=False)
 def get_user(uid):
     return q_one(
         "SELECT * FROM users WHERE id=%s",
@@ -365,6 +366,7 @@ def get_user(uid):
     )
 
 
+@st.cache_data(ttl=30, show_spinner=False)
 def get_user_email(email):
     return q_one(
         "SELECT * FROM users WHERE email=%s",
@@ -372,6 +374,7 @@ def get_user_email(email):
     )
 
 
+@st.cache_data(ttl=30, show_spinner=False)
 def get_links(uid):
     return q_all("""
         SELECT fl.*, 
@@ -751,7 +754,6 @@ def relation_selectbox(label: str, key: str, default: str = "Son") -> str:
         chosen_group = st.selectbox(
             "Category",
             options=group_names,
-            index=group_names.index(st.session_state[group_key]),
             key=group_key,
         )
     rels_in_group = RELATION_GROUPS[chosen_group]
@@ -784,7 +786,7 @@ def process_photo(uploaded_file, size=150) -> tuple:
         b64 = base64.b64encode(buf.getvalue()).decode()
         return f"data:image/jpeg;base64,{b64}", None
     except Exception as e:
-        return None, f"Could not process image: {e}"
+        return None, "Could not process image. Please try a different file."
 
 def process_photo_rect(uploaded_file, max_w=800, max_h=600) -> tuple:
     """For album photos — keep aspect ratio, just resize large images."""
@@ -799,7 +801,7 @@ def process_photo_rect(uploaded_file, max_w=800, max_h=600) -> tuple:
         b64 = base64.b64encode(buf.getvalue()).decode()
         return f"data:image/jpeg;base64,{b64}", None
     except Exception as e:
-        return None, f"Could not process image: {e}"
+        return None, "Could not process image. Please try a different file."
 
 def avatar_html(photo_data, initials, size=72):
     if photo_data:
@@ -861,7 +863,7 @@ header[data-testid="stHeader"]{background:transparent!important;}
 .msg-error  {background:#FDECEA;border-left:4px solid #C0392B;border-radius:8px;padding:.85rem 1rem;margin:.7rem 0;color:#922B21;font-size:.88rem;}
 .msg-info   {background:#EAF0FB;border-left:4px solid #3B6ECA;border-radius:8px;padding:.85rem 1rem;margin:.7rem 0;color:#1A3A6E;font-size:.88rem;}
 
-.otp-display{background:#FDF3DC;border:2px dashed var(--gold);border-radius:10px;padding:1rem;text-align:center;font-family:'Courier New',monospace;font-size:2rem;font-weight:bold;color:var(--rust);letter-spacing:8px;margin:1rem 0;}
+
 .fancy-divider{border:none;height:1px;background:linear-gradient(to right,transparent,var(--parchment),transparent);margin:1.2rem 0;}
 
 /* Rel chips */
@@ -997,7 +999,7 @@ header[data-testid="stHeader"]{background:transparent!important;}
 # ── Session state ─────────────────────────────────────────────────────────────
 _defaults = {
     "page": "landing", "user": None,
-    "otp": None, "otp_email": None,
+    "otp_email": None,
     "reg_step": 1, "reg_data": {},
     "msg": None, "msg_type": "info",
     "viewed_profile": None,
@@ -1077,7 +1079,7 @@ def ensure_dob(val):
 def page_landing():
     render_hero()
     if _db_error:
-        st.markdown(f'<div class="msg-error">🔌 DB not connected: {_db_error}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="msg-error">🔌 DB not connected. Please try again later.</div>', unsafe_allow_html=True)
 
     c1, c2, c3 = st.columns([1, 1.2, 1])
     with c2:
@@ -1148,10 +1150,9 @@ def page_login():
 def page_register():
     render_hero(); show_msg()
     step = st.session_state.reg_step
-    st.progress(step / 3, text=f"Step {step} of 3")
+    st.progress(step / 2, text=f"Step {step} of 2")
     if step == 1: _step1()
-    elif step == 2: _step2()
-    else: _step3()
+    else: _step2()
 
 def _step1():
     c1, c2, c3 = st.columns([.5, 2, .5])
@@ -1229,70 +1230,29 @@ def _step2():
         with b1:
             if st.button("← Back", use_container_width=True): st.session_state.reg_step = 1; st.rerun()
         with b2:
-            if st.button("Continue →", type="primary", use_container_width=True):
+            if st.button("✅ Register", type="primary", use_container_width=True):
                 d.update({"gender": gender, "birth_city": birth_city.strip(),
                           "current_city": current_city.strip(), "occupation": occupation.strip()})
-                otp = gen_otp()
-                st.session_state.otp       = otp
-                st.session_state.otp_email = d["email"]
                 if db_ok():
-                    q_exec("""INSERT INTO otp_store(email,otp,expires_at)
-                               VALUES(%s,%s,%s)
-                               ON CONFLICT(email) DO UPDATE
-                               SET otp=EXCLUDED.otp, expires_at=EXCLUDED.expires_at""",
-                           (d["email"], otp, datetime.utcnow() + timedelta(minutes=10)))
-                st.session_state.reg_step = 3
-                st.rerun()
-        st.markdown('</div>', unsafe_allow_html=True)
-
-def _step3():
-    c1, c2, c3 = st.columns([.5, 2, .5])
-    with c2:
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.markdown('<div class="card-title">📧 Verify Email</div>', unsafe_allow_html=True)
-        email = st.session_state.otp_email
-        st.markdown(f"OTP sent to **{email}**.")
-        if st.session_state.otp:
-            st.markdown(f'<div class="msg-info">📌 <strong>Demo Mode</strong> — Your OTP:</div>'
-                        f'<div class="otp-display">{st.session_state.otp}</div>', unsafe_allow_html=True)
-
-        otp_in = st.text_input("Enter OTP", placeholder="6-digit code", max_chars=6)
-        show_msg()
-
-        b1, b2 = st.columns(2)
-        with b1:
-            if st.button("← Back", use_container_width=True): st.session_state.reg_step = 2; st.rerun()
-        with b2:
-            if st.button("✅ Verify & Register", type="primary", use_container_width=True):
-                if not otp_in.strip():
-                    set_msg("Enter OTP.", "error")
-                elif otp_in.strip() != st.session_state.otp:
-                    set_msg("Wrong OTP.", "error")
+                    try:
+                        row = q_exec_return("""
+                            INSERT INTO users(full_name,email,password,dob,dynasty_name,
+                                              gender,birth_city,current_city,occupation,
+                                              profile_photo,verified)
+                            VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,TRUE) RETURNING *""",
+                            (d["full_name"], d["email"], hash_pw(d["password"]),
+                             d["dob"], d["dynasty_name"], d.get("gender", ""),
+                             d.get("birth_city", ""), d.get("current_city", ""),
+                             d.get("occupation", ""), d.get("profile_photo", "")))
+                        st.session_state.user     = dict(row)
+                        st.session_state.reg_data = {}
+                        st.session_state.reg_step = 1
+                        set_msg(f"Welcome, {d['full_name']}! 🌳", "success")
+                        goto("dashboard")
+                    except Exception as e:
+                        set_msg("Registration failed. Please try again.", "error")
                 else:
-                    d = st.session_state.reg_data
-                    if db_ok():
-                        try:
-                            row = q_exec_return("""
-                                INSERT INTO users(full_name,email,password,dob,dynasty_name,
-                                                  gender,birth_city,current_city,occupation,
-                                                  profile_photo,verified)
-                                VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,TRUE) RETURNING *""",
-                                (d["full_name"], d["email"], hash_pw(d["password"]),
-                                 d["dob"], d["dynasty_name"], d.get("gender", ""),
-                                 d.get("birth_city", ""), d.get("current_city", ""),
-                                 d.get("occupation", ""), d.get("profile_photo", "")))
-                            q_exec("DELETE FROM otp_store WHERE email=%s", (d["email"],))
-                            st.session_state.user       = dict(row)
-                            st.session_state.otp        = None
-                            st.session_state.otp_email  = None
-                            st.session_state.reg_data   = {}
-                            st.session_state.reg_step   = 1
-                            set_msg(f"Welcome, {d['full_name']}! 🌳", "success")
-                            goto("dashboard")
-                        except Exception as e:
-                            set_msg(f"Registration failed: {e}", "error")
-                    else:
-                        set_msg("DB not connected.", "error")
+                    set_msg("DB not connected.", "error")
                 st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
 
@@ -1472,6 +1432,7 @@ def _detailed_profile_tab(current_uid):
                     new_bio = st.text_area("Your bio (max 300 chars)", value=bio, max_chars=300, key="dp_bio_edit")
                     if st.button("Save Bio", key="dp_bio_save", type="primary"):
                         q_exec("UPDATE users SET bio=%s WHERE id=%s", (new_bio.strip(), current_uid))
+                        get_user.clear()
                         st.session_state.user = dict(get_user(current_uid))
                         set_msg("Bio updated! ✨", "success"); st.rerun()
             st.markdown('</div>', unsafe_allow_html=True)
@@ -1521,6 +1482,7 @@ def _detailed_profile_tab(current_uid):
                     if field not in _PRIVACY_COLS:
                         raise ValueError(f"Illegal column: {field}")
                     q_exec(f"UPDATE users SET {field}=%s WHERE id=%s", (new_val, current_uid))
+                    get_user.clear()
                     st.session_state.user = dict(get_user(current_uid)); st.rerun()
 
             privacy_toggle("Show Date of Birth", "Visible to all members", "privacy_dob", priv_dob, "priv_dob_tog")
@@ -2792,14 +2754,15 @@ def _dynasty_search_tab(uid):
         for idx, (r, dob_r, age_r) in enumerate(filtered):
             r_init = "".join(p[0].upper() for p in r["full_name"].split()[:2])
             with cols[idx % 3]:
+                city_badge = f'<span class="badge badge-green">{r["current_city"]}</span>' if r.get("current_city") else ""
                 st.markdown(f"""
                 <div class="member-card">
                     <div style="display:flex;justify-content:center;">{avatar_html(r.get("profile_photo") or None, r_init, 54)}</div>
                     <div class="member-card-name">{r['full_name']}</div>
-                    <div class="member-card-dynasty">🏰 {r['dynasty_name']}</div>
+                    <div class="member-card-dynasty">&#127968; {r['dynasty_name']}</div>
                     <div style="display:flex;flex-wrap:wrap;justify-content:center;gap:.22rem;margin-top:.45rem;">
                         <span class="badge badge-gold">{_infer_generation(age_r)}</span>
-                        {f'<span class="badge badge-green">{r["current_city"]}</span>' if r.get("current_city") else ""}
+                        {city_badge}
                     </div>
                 </div>""", unsafe_allow_html=True)
                 if st.button("View Profile", key=f"vp_{r['id']}", use_container_width=True):
@@ -2809,12 +2772,12 @@ def _dynasty_search_tab(uid):
             r_init = "".join(p[0].upper() for p in r["full_name"].split()[:2])
             lc1, lc2 = st.columns([5, 1])
             with lc1:
+                city_str = f" · {r['current_city']}" if r.get('current_city') else ""
                 st.markdown(f"""
                 <div class="member-list-row">
                     {avatar_html(r.get("profile_photo") or None, r_init, 42)}
                     <div><div class="member-list-name">{r['full_name']}</div>
-                    <div class="member-list-meta">🏰 {r['dynasty_name']} · Age {age_r}
-                    {f" · {r['current_city']}" if r.get('current_city') else ""} · {_infer_generation(age_r)}</div></div>
+                    <div class="member-list-meta">&#127968; {r['dynasty_name']} · Age {age_r}{city_str} · {_infer_generation(age_r)}</div></div>
                 </div>""", unsafe_allow_html=True)
             with lc2:
                 if st.button("View", key=f"vlp_{r['id']}", use_container_width=True):
@@ -3532,12 +3495,14 @@ def _settings_tab(uid):
                     if err: set_msg(err, "error")
                     else:
                         q_exec("UPDATE users SET profile_photo=%s WHERE id=%s", (pd, uid))
+                        get_user.clear()
                         st.session_state.user = dict(get_user(uid))
                         set_msg("Profile photo updated! 📸", "success")
                 st.rerun()
         with sc2:
             if st.button("🗑️ Remove", use_container_width=True, disabled=not current_photo):
                 q_exec("UPDATE users SET profile_photo='' WHERE id=%s", (uid,))
+                get_user.clear()
                 st.session_state.user = dict(get_user(uid))
                 set_msg("Photo removed.", "info"); st.rerun()
 
@@ -3557,6 +3522,7 @@ def _settings_tab(uid):
                 q_exec("""UPDATE users SET full_name=%s,occupation=%s,birth_city=%s,
                            current_city=%s,gender=%s,dynasty_name=%s WHERE id=%s""",
                        (fn.strip(), occ.strip(), bc.strip(), cc.strip(), gen, dyn.strip(), uid))
+                get_user.clear()
                 st.session_state.user = dict(get_user(uid))
                 set_msg("Profile updated! ✨", "success")
             st.rerun()
@@ -3573,6 +3539,7 @@ def _settings_tab(uid):
             elif np1 != np2:   set_msg("Passwords don't match.", "error")
             else:
                 q_exec("UPDATE users SET password=%s WHERE id=%s", (hash_pw(np1), uid))
+                get_user.clear()
                 st.session_state.user = dict(get_user(uid))
                 set_msg("Password changed! 🔒", "success")
             st.rerun()
