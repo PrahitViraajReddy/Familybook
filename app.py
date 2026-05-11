@@ -25,25 +25,32 @@ st.set_page_config(
 )
 
 # ── PostgreSQL connection pool ───────────────────────────────────────────────
-
+# Credentials: keep in .streamlit/secrets.toml in production.
+# On Render: set POSTGRES_URI as an environment variable.
 import psycopg2.pool as _pg_pool
 from contextlib import contextmanager
+import os
 
-POSTGRES_URI = st.secrets.get(
-    "POSTGRES_URI"
-    )
+# Try st.secrets first (local / Streamlit Cloud), fallback to env var (Render)
+POSTGRES_URI = st.secrets.get("POSTGRES_URI") or os.environ.get("POSTGRES_URI")
+
+if not POSTGRES_URI:
+    st.error("❌ POSTGRES_URI not set. Add it to .streamlit/secrets.toml or as an environment variable.")
+    st.stop()
 
 # ── TCP keepalives stop Supabase from silently killing idle connections ───────
 # keepalives=1          → enable TCP keepalive probes
 # keepalives_idle=30    → send first probe after 30 s of silence
 # keepalives_interval=5 → re-probe every 5 s
 # keepalives_count=3    → drop connection after 3 failed probes
+# sslmode=require       → required by Supabase connection pooler
 _KEEPALIVE_KWARGS = dict(
     keepalives=1,
     keepalives_idle=30,
     keepalives_interval=5,
     keepalives_count=3,
     connect_timeout=10,
+    sslmode="require",
 )
 
 def _new_connection():
@@ -236,6 +243,20 @@ def _init_db():
 
             CREATE INDEX IF NOT EXISTS idx_timeline_dynasty
             ON family_timeline(dynasty_name);
+
+            -- Prevent the same registered member from being linked twice under
+            -- different relation names. The constraint is partial (WHERE member_id
+            -- IS NOT NULL) so unregistered name-only entries are unaffected.
+            DO $$ BEGIN
+              IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'uq_family_links_user_member'
+              ) THEN
+                ALTER TABLE family_links
+                  ADD CONSTRAINT uq_family_links_user_member
+                  UNIQUE (user_id, member_id);
+              END IF;
+            END $$;
             """)
         conn.commit()
 
@@ -446,12 +467,6 @@ RELATION_ALIASES: dict[str, str] = {
     "bhanji":                       "Niece",
 }
 
-def normalize_relation(rel: str) -> str:
-    """
-    Return the canonical relation string for a given input.
-    Strips extra whitespace, tries exact match first, then
-    case-insensitive alias lookup, finally returns the original.
-    """
 RELATION_GEN = {
     "Great-grandfather": -3, "Great-grandmother": -3,
     "Paternal Grandfather": -2, "Paternal Grandmother": -2,
@@ -531,9 +546,9 @@ INVERSE_RELATION = {
     "Mother":           "Son",
     "Stepfather":       "Stepson",
     "Stepmother":       "Stepson",
-    # Siblings ↔ Siblings
-    "Brother":          "Brother",
-    "Sister":           "Sister",
+    # Siblings ↔ Siblings  (gender-refined by get_inverse_relation)
+    "Brother":          "Brother",   # refined to "Sister" if target is female
+    "Sister":           "Sister",    # refined to "Brother" if target is male
     "Stepbrother":      "Stepbrother",
     "Stepsister":       "Stepsister",
     # Spouse ↔ Spouse
@@ -2607,8 +2622,8 @@ buildInfo();
 // resetView needs real viewport dimensions. Inside a Streamlit tab the iframe
 // is hidden (display:none or zero-size) until the user clicks the tab, so
 // requestAnimationFrame fires when clientWidth/clientHeight are still 0 and
-// the tree ends up invisible. Use ResizeObserver to re-run resetView the first
-// time the viewport actually has a non-zero size.
+// the tree ends up invisible. Use ResizeObserver + staggered setTimeouts to
+// re-run resetView the first time the viewport actually has a non-zero size.
 let _booted = false;
 function _boot() {{
   if (_booted) return;
@@ -2621,6 +2636,11 @@ function _boot() {{
 }}
 // Try immediately in case the tab is already visible
 requestAnimationFrame(_boot);
+// Staggered fallbacks for browsers that don't fire ResizeObserver reliably
+// when a hidden Streamlit tab becomes visible
+setTimeout(_boot, 500);
+setTimeout(_boot, 1200);
+setTimeout(_boot, 2500);
 // Also watch for when the element is resized into view (tab click)
 if (typeof ResizeObserver !== 'undefined') {{
   const ro = new ResizeObserver(() => {{
