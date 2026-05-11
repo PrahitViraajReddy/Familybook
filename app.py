@@ -2943,7 +2943,7 @@ def _album_detail_view(uid, dynasty):
             up_location = st.text_input("Location",      placeholder="", key=f"up_loc_{alb_id}")
         with uf_col2:
             up_tags    = st.text_input("Tags (comma separated)", placeholder="", key=f"up_tags_{alb_id}")
-            up_date    = st.date_input("Date Taken", value=date.today(), key=f"up_date_{alb_id}")
+            up_date= st.date_input("Date Taken", value=date.today(), key=f"up_date_{alb_id}", format="DD/MM/YYYY")
 
         if st.button("Upload", type="primary", key=f"do_upload_{alb_id}"):
             if not up_files:
@@ -3056,7 +3056,7 @@ def _family_diary_tab(uid):
         st.markdown(f'<div style="font-family:\'Cormorant Garamond\',serif;font-size:1.45rem;font-weight:700;color:var(--bark);margin-bottom:.8rem;">{"✏️ Edit Entry" if mode=="edit" else "📝 New Diary Entry"}</div>', unsafe_allow_html=True)
 
         d_title   = st.text_input("Title *", value=entry["title"] if entry else "", placeholder="", key="d_title")
-        d_date    = st.date_input("Date", value=ensure_dob(entry["entry_date"]) if entry else date.today(), key="d_date")
+        d_date    = st.date_input("Date", value=ensure_dob(entry["entry_date"]) if entry else date.today(), key="d_date", format="DD/MM/YYYY")
         d_content = st.text_area("Write your entry…", value=entry["content"] if entry else "",
             height=280, key="d_content", placeholder="")
 
@@ -3220,7 +3220,7 @@ def _family_timeline_tab(uid, dynasty):
             with et_col1:
                 ev_type  = st.selectbox("Event Type *", EVENT_TYPES, key="ev_type")
                 ev_title = st.text_input("Title *", placeholder="", key="ev_title")
-                ev_date  = st.date_input("Event Date *", key="ev_date")
+                ev_date  = st.date_input("Event Date *", key="ev_date", format="DD/MM/YYYY")
                 ev_loc   = st.text_input("Location", placeholder="", key="ev_loc")
             with et_col2:
                 ev_desc  = st.text_area("Description", placeholder="", key="ev_desc", height=100)
