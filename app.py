@@ -25,7 +25,7 @@ st.set_page_config(
 )
 
 # ── PostgreSQL connection pool ───────────────────────────────────────────────
-# Credentials: keep in .streamlit/secrets.toml in production.
+
 import psycopg2.pool as _pg_pool
 from contextlib import contextmanager
 
