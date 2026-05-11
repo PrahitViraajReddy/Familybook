@@ -1193,7 +1193,7 @@ def _step1():
         pass1     = st.text_input("Password *",     type="password",                 placeholder="")
         pass2     = st.text_input("Confirm Password *",  type="password",                 placeholder="")
         dob_val   = ensure_dob(d["dob"]) if d.get("dob") else None
-        dob       = st.date_input("Date of Birth *", value=dob_val, min_value=date(1900, 1, 1), max_value=date.today())
+        dob       = st.date_input("Date of Birth *", value=dob_val, min_value=date(1600, 1, 1), max_value=date.today(), format="DD/MM/YYYY")
         dynasty   = st.text_input("Dynasty Name *", value=d.get("dynasty_name", ""), placeholder="")
         st.caption("🏰 Dynasty name connects you with other family members.")
 
