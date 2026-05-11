@@ -126,6 +126,9 @@ def _init_db():
                 birth_city    TEXT        DEFAULT '',
                 current_city  TEXT        DEFAULT '',
                 occupation    TEXT        DEFAULT '',
+                religion      TEXT        DEFAULT '',
+                caste         TEXT        DEFAULT '',
+                gotram        TEXT        DEFAULT '',
                 profile_photo TEXT        DEFAULT '',
                 bio           TEXT        DEFAULT '',
                 privacy_dob   BOOLEAN     DEFAULT TRUE,
@@ -223,6 +226,9 @@ def _init_db():
             ALTER TABLE users ADD COLUMN IF NOT EXISTS bio TEXT DEFAULT '';
             ALTER TABLE users ADD COLUMN IF NOT EXISTS privacy_dob BOOLEAN DEFAULT TRUE;
             ALTER TABLE users ADD COLUMN IF NOT EXISTS privacy_email BOOLEAN DEFAULT FALSE;
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS religion TEXT DEFAULT '';
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS caste TEXT DEFAULT '';
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS gotram TEXT DEFAULT '';
             ALTER TABLE users ADD COLUMN IF NOT EXISTS privacy_city BOOLEAN DEFAULT TRUE;
             ALTER TABLE users ADD COLUMN IF NOT EXISTS privacy_occ BOOLEAN DEFAULT TRUE;
 
@@ -1229,6 +1235,9 @@ def _step2():
         birth_city   = st.text_input("Birth City",   value=d.get("birth_city", ""),   placeholder="")
         current_city = st.text_input("Current City", value=d.get("current_city", ""), placeholder="")
         occupation   = st.text_input("Occupation",   value=d.get("occupation", ""),   placeholder="")
+        religion     = st.text_input("Religion",     value=d.get("religion", ""),     placeholder="")
+        caste        = st.text_input("Caste",        value=d.get("caste", ""),        placeholder="")
+        gotram       = st.text_input("Gotram",       value=d.get("gotram", ""),       placeholder="")
 
         st.markdown('<hr class="fancy-divider">', unsafe_allow_html=True)
         st.markdown("**📷 Profile Photo** *(optional)*")
@@ -1257,18 +1266,22 @@ def _step2():
         with b2:
             if st.button("✅ Register", type="primary", use_container_width=True):
                 d.update({"gender": gender, "birth_city": birth_city.strip(),
-                          "current_city": current_city.strip(), "occupation": occupation.strip()})
+          "current_city": current_city.strip(), "occupation": occupation.strip(),
+          "religion": religion.strip(), "caste": caste.strip(), "gotram": gotram.strip()})
                 if db_ok():
                     try:
                         row = q_exec_return("""
                             INSERT INTO users(full_name,email,password,dob,dynasty_name,
                                               gender,birth_city,current_city,occupation,
+                                              religion,caste,gotram,
                                               profile_photo,verified)
-                            VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,TRUE) RETURNING *""",
+                            VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,TRUE) RETURNING *""",
                             (d["full_name"], d["email"], hash_pw(d["password"]),
                              d["dob"], d["dynasty_name"], d.get("gender", ""),
                              d.get("birth_city", ""), d.get("current_city", ""),
-                             d.get("occupation", ""), d.get("profile_photo", "")))
+                             d.get("occupation", ""), d.get("religion", ""),
+                             d.get("caste", ""), d.get("gotram", ""),
+                             d.get("profile_photo", "")))
                         st.session_state.user     = dict(row)
                         st.session_state.reg_data = {}
                         st.session_state.reg_step = 1
@@ -1437,6 +1450,9 @@ def _detailed_profile_tab(current_uid):
         if u.get("birth_city"): details.append(("🏡 Birth City", u["birth_city"]))
         if (priv_city or is_self) and u.get("current_city"): details.append(("🏙️ Current City", u["current_city"]))
         if (priv_occ  or is_self) and u.get("occupation"):   details.append(("💼 Occupation", u["occupation"]))
+        if u.get("religion"):  details.append(("🛕 Religion", u["religion"]))
+        if u.get("caste"):     details.append(("🏷️ Caste",    u["caste"]))
+        if u.get("gotram"):    details.append(("🔱 Gotram",   u["gotram"]))
         if priv_email or is_self: details.append(("📧 Email", u.get("email", "—")))
         if u.get("created_at"): details.append(("📅 Member Since", u["created_at"].strftime("%B %Y")))
         for k, v in details:
@@ -3535,6 +3551,9 @@ def _settings_tab(uid):
     with st.form("edit_form"):
         fn  = st.text_input("Full Name",    value=u["full_name"])
         occ = st.text_input("Occupation",   value=u.get("occupation", ""))
+        rel = st.text_input("Religion",     value=u.get("religion", ""))
+        cst = st.text_input("Caste",        value=u.get("caste", ""))
+        got = st.text_input("Gotram",       value=u.get("gotram", ""))
         bc  = st.text_input("Birth City",   value=u.get("birth_city", ""))
         cc  = st.text_input("Current City", value=u.get("current_city", ""))
         opts = ["Prefer not to say", "Male", "Female", "Other"]
@@ -3545,8 +3564,10 @@ def _settings_tab(uid):
                 set_msg("Full Name and Dynasty Name required.", "error")
             else:
                 q_exec("""UPDATE users SET full_name=%s,occupation=%s,birth_city=%s,
-                           current_city=%s,gender=%s,dynasty_name=%s WHERE id=%s""",
-                       (fn.strip(), occ.strip(), bc.strip(), cc.strip(), gen, dyn.strip(), uid))
+                           current_city=%s,gender=%s,dynasty_name=%s,
+                           religion=%s,caste=%s,gotram=%s WHERE id=%s""",
+                       (fn.strip(), occ.strip(), bc.strip(), cc.strip(), gen, dyn.strip(),
+                        rel.strip(), cst.strip(), got.strip(), uid))
                 get_user.clear()
                 st.session_state.user = dict(get_user(uid))
                 set_msg("Profile updated! ✨", "success")
