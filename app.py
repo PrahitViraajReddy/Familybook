@@ -2306,21 +2306,17 @@ function drawEdges(){{
   }}
 
   // Fallback: any unpaired parent nodes use the old shared-bar approach
-  // FIXED CODE - replace karo:
   const unpairedParents = parentNodes.filter(n=>!parentCoupleHandled.has(n.id));
   if(unpairedParents.length && bloodNodes.length){{
-    // Single child case (sirf "You", koi sibling nahi):
-    // Bar ek point ban jaata hai aur connection nahi dikhta.
-    // Is case mein seedha parent se child tak line draw karo.
     if(bloodNodes.length === 1){{
-      const child = bloodNodes[0];
+      // Sirf ek child (You, koi sibling nahi) — seedha parent se child tak line
       for(const par of unpairedParents){{
-        elbow(par.x, par.y+NH/2, child.x, child.y-NH/2, parentCol+'99');
+        elbow(par.x, par.y+NH/2, bloodNodes[0].x, bloodNodes[0].y-NH/2, parentCol+'99');
       }}
     }} else {{
-      // Multiple children: T-bar approach
+      // Multiple children — T-bar approach
       const parBottomY = unpairedParents[0].y + NH/2;
-      const bloodTopY  = bloodNodes[0].y - NH/2;
+      const bloodTopY  = bloodNodes[0].y  - NH/2;
       const barY = (parBottomY + bloodTopY) / 2;
 
       const bxs  = bloodNodes.map(n=>n.x);
@@ -2347,7 +2343,6 @@ function drawEdges(){{
       }}
     }}
   }}
-
 
   // ── 3b. Parents also connect down to each married sibling (blood child) ──────
   // e.g. Father+Mother → Sister (even though Sister has a spouse/BIL)
@@ -3050,7 +3045,7 @@ def _album_detail_view(uid, dynasty):
 
     if alb["user_id"] == uid:
         st.markdown('<hr class="fancy-divider">', unsafe_allow_html=True)
-        with st.expander("Options"):
+        with st.expander("⚠️ Danger Zone"):
             if st.button("🗑️ Delete Album", key="del_album"):
                 q_exec("DELETE FROM family_albums WHERE id=%s", (alb_id,))
                 set_msg("Album deleted.", "info")
