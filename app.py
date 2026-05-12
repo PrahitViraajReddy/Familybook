@@ -2271,23 +2271,25 @@ function drawEdges(){{
     if(!pa||!pb) continue;
     parentCoupleHandled.add(ac.nid_a); parentCoupleHandled.add(ac.nid_b);
     const unionX = (pa.x + pb.x) / 2;
-    const unionY = pa.y;  // both at same Y
+    const unionY = pa.y;
+    const stemY = unionY + NH/2;
 
-    if(bloodNodes.length){{
-      // Stem from couple bottom down to children
+    if(bloodNodes.length === 1){{
+      // Sirf ek child — seedha elbow: couple midpoint se child tak
+      // Isse unionX aur child.x ka gap cover hota hai
+      const child = bloodNodes[0];
+      elbow(unionX, stemY, child.x, child.y - NH/2, parentCol+'99');
+    }} else if(bloodNodes.length > 1){{
+      // Multiple children — T-bar
       const bxs  = bloodNodes.map(n=>n.x);
       const barX1= Math.min(...bxs), barX2=Math.max(...bxs);
-      const stemY = unionY + NH/2;
       const barY  = (stemY + bloodNodes[0].y - NH/2) / 2;
+      const midBar = (barX1+barX2)/2;
 
-      // Vertical stem from union midpoint
-      const vl=svgEl('line');
-      vl.setAttribute('x1',unionX); vl.setAttribute('y1',stemY);
-      vl.setAttribute('x2',unionX); vl.setAttribute('y2',barY);
-      vl.setAttribute('stroke',parentCol+'99'); vl.setAttribute('stroke-width','1.8');
-      svg.appendChild(vl);
+      // Stem from unionX down to barY, then elbow to midBar if needed
+      elbow(unionX, stemY, midBar, barY, parentCol+'99');
 
-      // Horizontal bar spanning children
+      // Horizontal bar
       const hBar=svgEl('line');
       hBar.setAttribute('x1',barX1); hBar.setAttribute('y1',barY);
       hBar.setAttribute('x2',barX2); hBar.setAttribute('y2',barY);
@@ -2895,16 +2897,20 @@ def _family_album_tab(uid, dynasty):
     cols = st.columns(min(len(albums), 4))
     for idx, alb in enumerate(albums):
         with cols[idx % min(len(albums), 4)]:
-            if alb.get("cover_photo"):
-                st.markdown(f'<div class="album-card"><img src="{alb["cover_photo"]}" class="album-cover" />', unsafe_allow_html=True)
-            else:
-                st.markdown('<div class="album-card"><div class="album-cover-placeholder">📁</div>', unsafe_allow_html=True)
             priv_badge = "🏰" if alb["privacy"] == "dynasty" else "🔒"
+            cover_html = (
+                f'<img src="{alb["cover_photo"]}" class="album-cover" />'
+                if alb.get("cover_photo")
+                else '<div class="album-cover-placeholder">📁</div>'
+            )
             st.markdown(f"""
-            <div class="album-info">
-                <div class="album-title">{alb['title']}</div>
-                <div class="album-meta">{priv_badge} · {alb['media_count']} photos · by {alb['creator_name']}</div>
-            </div></div>""", unsafe_allow_html=True)
+            <div class="album-card">
+                {cover_html}
+                <div class="album-info">
+                    <div class="album-title">{_esc(alb['title'])}</div>
+                    <div class="album-meta">{priv_badge} · {alb['media_count']} photos · by {_esc(alb['creator_name'])}</div>
+                </div>
+            </div>""", unsafe_allow_html=True)
             if st.button("Open", key=f"open_al_{alb['id']}", use_container_width=True):
                 st.session_state.current_album_id = alb["id"]
                 st.session_state.album_view = "grid"
@@ -3188,18 +3194,21 @@ def _family_diary_tab(uid):
         draft_badge = '<span class="badge badge-gold">Draft</span>' if e.get("is_draft") else ""
         priv_badge = "🔒" if e["privacy"] == "private" else "🏰"
 
+        tags_html = (
+            '<div style="margin-top:.35rem;">'
+            + "".join(f'<span class="badge badge-blue"># {t.strip()}</span>' for t in e["tags"].split(",") if t.strip())
+            + '</div>'
+        ) if e.get("tags") else ""
         st.markdown(f"""
         <div class="diary-entry">
             <div class="diary-date">{priv_badge} {ed.strftime('%d %B %Y')} {draft_badge}</div>
-            <div class="diary-title">{mood_str}{e['title']}</div>
-            <div class="diary-preview">{preview}</div>
-            {f'<div style="margin-top:.35rem;">' + "".join(f'<span class="badge badge-blue"># {t.strip()}</span>' for t in e["tags"].split(",") if t.strip()) + '</div>' if e.get("tags") else ""}
+            <div class="diary-title">{mood_str}{_esc(e['title'])}</div>
+            <div class="diary-preview">{_esc(preview)}</div>
+            {tags_html}
         </div>""", unsafe_allow_html=True)
-        ec1, ec2 = st.columns([4, 1])
-        with ec2:
-            if st.button("Read →", key=f"read_entry_{e['id']}", use_container_width=True):
-                st.session_state.diary_entry_id = e["id"]
-                st.session_state.diary_mode = "view"; st.rerun()
+        if st.button("→ Read", key=f"read_entry_{e['id']}", use_container_width=True):
+            st.session_state.diary_entry_id = e["id"]
+            st.session_state.diary_mode = "view"; st.rerun()
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 3.3  FAMILY TIMELINE
@@ -3330,16 +3339,15 @@ def _family_timeline_tab(uid, dynasty):
                 </div>
             </div>""", unsafe_allow_html=True)
 
-            if ev.get("media_data") or ev["user_id"] == uid:
-                ec1, ec2 = st.columns([4, 1])
-                with ec1:
-                    if ev.get("media_data"):
-                        st.image(ev["media_data"], width=300)
-                with ec2:
-                    if ev["user_id"] == uid:
-                        if st.button("🗑️", key=f"del_ev_{ev['id']}", help="Delete event"):
-                            q_exec("DELETE FROM family_timeline WHERE id=%s", (ev["id"],))
-                            set_msg("Event removed.", "info"); st.rerun()
+            col_img, col_del = st.columns([4, 1])
+            with col_img:
+                if ev.get("media_data"):
+                    st.image(ev["media_data"], width=300)
+            with col_del:
+                if ev["user_id"] == uid:
+                    if st.button("🗑️", key=f"del_ev_{ev['id']}", help="Delete event"):
+                        q_exec("DELETE FROM family_timeline WHERE id=%s", (ev["id"],))
+                        set_msg("Event removed.", "info"); st.rerun()
 
 # ══════════════════════════════════════════════════════════════════════════════
 # FAMILY LINKS TAB — with bidirectional link support (PATCHED)
