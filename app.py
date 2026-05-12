@@ -1964,13 +1964,11 @@ def _build_tree_data(uid):
     nodes[self_id]["_sibChildren"]     = sib_children
     nodes[self_id]["_siblingCouples"]  = ([[sister_id, bil_id]] if (sister_id and bil_id) else
                                           ([[sister_id, None]] if sister_id else []))
-   
-# SIRF YAHI BADLO:
-nodes[self_id]["_ancestorCouples"] = [
-    {"nid_a": ac["nid_a"], "nid_b": ac["nid_b"], "gen": ac["gen"],
-     "child_nid": ac["child_nid"], "isSibPil": ac.get("isSibPil", False)}  # ← sirf yeh line add hui
-    for ac in ancestor_couples
-]
+    nodes[self_id]["_ancestorCouples"] = [
+        {"nid_a": ac["nid_a"], "nid_b": ac["nid_b"], "gen": ac["gen"],
+         "child_nid": ac["child_nid"], "isSibPil": ac.get("isSibPil", False)}  
+        for ac in ancestor_couples
+    ]
 
 # YAHA KUCH MAT CHHEDNA — return already hai:
 return nodes, self_id
