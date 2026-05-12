@@ -3050,7 +3050,7 @@ def _album_detail_view(uid, dynasty):
 
     if alb["user_id"] == uid:
         st.markdown('<hr class="fancy-divider">', unsafe_allow_html=True)
-        with st.expander("⚠️ Danger Zone"):
+        with st.expander("Options"):
             if st.button("🗑️ Delete Album", key="del_album"):
                 q_exec("DELETE FROM family_albums WHERE id=%s", (alb_id,))
                 set_msg("Album deleted.", "info")
