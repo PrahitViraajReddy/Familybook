@@ -2306,43 +2306,48 @@ function drawEdges(){{
   }}
 
   // Fallback: any unpaired parent nodes use the old shared-bar approach
+  // FIXED CODE - replace karo:
   const unpairedParents = parentNodes.filter(n=>!parentCoupleHandled.has(n.id));
   if(unpairedParents.length && bloodNodes.length){{
-    const parBottomY = unpairedParents[0].y + NH/2;
-    const bloodTopY  = bloodNodes[0].y  - NH/2;
-    const barY = (parBottomY + bloodTopY) / 2;
+    // Single child case (sirf "You", koi sibling nahi):
+    // Bar ek point ban jaata hai aur connection nahi dikhta.
+    // Is case mein seedha parent se child tak line draw karo.
+    if(bloodNodes.length === 1){{
+      const child = bloodNodes[0];
+      for(const par of unpairedParents){{
+        elbow(par.x, par.y+NH/2, child.x, child.y-NH/2, parentCol+'99');
+      }}
+    }} else {{
+      // Multiple children: T-bar approach
+      const parBottomY = unpairedParents[0].y + NH/2;
+      const bloodTopY  = bloodNodes[0].y - NH/2;
+      const barY = (parBottomY + bloodTopY) / 2;
 
-    const bxs  = bloodNodes.map(n=>n.x);
-    const barX1= Math.min(...bxs), barX2=Math.max(...bxs);
+      const bxs  = bloodNodes.map(n=>n.x);
+      const barX1= Math.min(...bxs), barX2=Math.max(...bxs);
 
-    const hBar=svgEl('line');
-    hBar.setAttribute('x1',barX1); hBar.setAttribute('y1',barY);
-    hBar.setAttribute('x2',barX2); hBar.setAttribute('y2',barY);
-    hBar.setAttribute('stroke',parentCol+'99'); hBar.setAttribute('stroke-width','1.8');
-    svg.appendChild(hBar);
+      const hBar=svgEl('line');
+      hBar.setAttribute('x1',barX1); hBar.setAttribute('y1',barY);
+      hBar.setAttribute('x2',barX2); hBar.setAttribute('y2',barY);
+      hBar.setAttribute('stroke',parentCol+'99'); hBar.setAttribute('stroke-width','1.8');
+      svg.appendChild(hBar);
 
-    for(const c of bloodNodes){{
-      const dl=svgEl('line');
-      dl.setAttribute('x1',c.x); dl.setAttribute('y1',barY);
-      dl.setAttribute('x2',c.x); dl.setAttribute('y2',c.y-NH/2);
-      dl.setAttribute('stroke',parentCol+'99'); dl.setAttribute('stroke-width','1.8');
-      svg.appendChild(dl);
-    }}
+      for(const c of bloodNodes){{
+        const dl=svgEl('line');
+        dl.setAttribute('x1',c.x); dl.setAttribute('y1',barY);
+        dl.setAttribute('x2',c.x); dl.setAttribute('y2',c.y-NH/2);
+        dl.setAttribute('stroke',parentCol+'99'); dl.setAttribute('stroke-width','1.8');
+        svg.appendChild(dl);
+      }}
 
-    for(const par of unpairedParents){{
-      const px=par.x, py=par.y+NH/2;
-      const bx=Math.max(barX1, Math.min(barX2, px));
-      if(Math.abs(px-bx)<1){{
-        const vl=svgEl('line');
-        vl.setAttribute('x1',px); vl.setAttribute('y1',py);
-        vl.setAttribute('x2',px); vl.setAttribute('y2',barY);
-        vl.setAttribute('stroke',parentCol+'99'); vl.setAttribute('stroke-width','1.8');
-        svg.appendChild(vl);
-      }} else {{
-        elbow(px,py,bx,barY,parentCol+'99');
+      for(const par of unpairedParents){{
+        const px=par.x, py=par.y+NH/2;
+        const midBar=(barX1+barX2)/2;
+        elbow(px, py, midBar, barY, parentCol+'99');
       }}
     }}
   }}
+
 
   // ── 3b. Parents also connect down to each married sibling (blood child) ──────
   // e.g. Father+Mother → Sister (even though Sister has a spouse/BIL)
