@@ -1969,8 +1969,6 @@ def _build_tree_data(uid):
          "child_nid": ac["child_nid"], "isSibPil": ac.get("isSibPil", False)}  
         for ac in ancestor_couples
     ]
-
-# YAHA KUCH MAT CHHEDNA — return already hai:
 return nodes, self_id
 
 
