@@ -26,24 +26,31 @@ st.set_page_config(
 
 # ── PostgreSQL connection pool ───────────────────────────────────────────────
 # Credentials: keep in .streamlit/secrets.toml in production.
+# On Render: set POSTGRES_URI as an environment variable.
 import psycopg2.pool as _pg_pool
 from contextlib import contextmanager
+import os
 
-POSTGRES_URI = st.secrets.get(
-    "POSTGRES_URI"
-    )
+# Try st.secrets first (local / Streamlit Cloud), fallback to env var (Render)
+POSTGRES_URI = st.secrets.get("POSTGRES_URI") or os.environ.get("POSTGRES_URI")
+
+if not POSTGRES_URI:
+    st.error("❌ POSTGRES_URI not set. Add it to .streamlit/secrets.toml or as an environment variable.")
+    st.stop()
 
 # ── TCP keepalives stop Supabase from silently killing idle connections ───────
 # keepalives=1          → enable TCP keepalive probes
 # keepalives_idle=30    → send first probe after 30 s of silence
 # keepalives_interval=5 → re-probe every 5 s
 # keepalives_count=3    → drop connection after 3 failed probes
+# sslmode=require       → required by Supabase connection pooler
 _KEEPALIVE_KWARGS = dict(
     keepalives=1,
     keepalives_idle=30,
     keepalives_interval=5,
     keepalives_count=3,
     connect_timeout=10,
+    sslmode="require",
 )
 
 def _new_connection():
@@ -119,6 +126,9 @@ def _init_db():
                 birth_city    TEXT        DEFAULT '',
                 current_city  TEXT        DEFAULT '',
                 occupation    TEXT        DEFAULT '',
+                religion      TEXT        DEFAULT '',
+                caste         TEXT        DEFAULT '',
+                gotram        TEXT        DEFAULT '',
                 profile_photo TEXT        DEFAULT '',
                 bio           TEXT        DEFAULT '',
                 privacy_dob   BOOLEAN     DEFAULT TRUE,
@@ -216,6 +226,9 @@ def _init_db():
             ALTER TABLE users ADD COLUMN IF NOT EXISTS bio TEXT DEFAULT '';
             ALTER TABLE users ADD COLUMN IF NOT EXISTS privacy_dob BOOLEAN DEFAULT TRUE;
             ALTER TABLE users ADD COLUMN IF NOT EXISTS privacy_email BOOLEAN DEFAULT FALSE;
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS religion TEXT DEFAULT '';
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS caste TEXT DEFAULT '';
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS gotram TEXT DEFAULT '';
             ALTER TABLE users ADD COLUMN IF NOT EXISTS privacy_city BOOLEAN DEFAULT TRUE;
             ALTER TABLE users ADD COLUMN IF NOT EXISTS privacy_occ BOOLEAN DEFAULT TRUE;
 
@@ -236,6 +249,20 @@ def _init_db():
 
             CREATE INDEX IF NOT EXISTS idx_timeline_dynasty
             ON family_timeline(dynasty_name);
+
+            -- Prevent the same registered member from being linked twice under
+            -- different relation names. The constraint is partial (WHERE member_id
+            -- IS NOT NULL) so unregistered name-only entries are unaffected.
+            DO $$ BEGIN
+              IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'uq_family_links_user_member'
+              ) THEN
+                ALTER TABLE family_links
+                  ADD CONSTRAINT uq_family_links_user_member
+                  UNIQUE (user_id, member_id);
+              END IF;
+            END $$;
             """)
         conn.commit()
 
@@ -337,6 +364,7 @@ def q_exec_return(sql, params=()):
             raise
 
 
+@st.cache_data(ttl=30, show_spinner=False)
 def get_user(uid):
     return q_one(
         "SELECT * FROM users WHERE id=%s",
@@ -344,6 +372,7 @@ def get_user(uid):
     )
 
 
+@st.cache_data(ttl=30, show_spinner=False)
 def get_user_email(email):
     return q_one(
         "SELECT * FROM users WHERE email=%s",
@@ -351,6 +380,7 @@ def get_user_email(email):
     )
 
 
+@st.cache_data(ttl=30, show_spinner=False)
 def get_links(uid):
     return q_all("""
         SELECT fl.*, 
@@ -446,12 +476,6 @@ RELATION_ALIASES: dict[str, str] = {
     "bhanji":                       "Niece",
 }
 
-def normalize_relation(rel: str) -> str:
-    """
-    Return the canonical relation string for a given input.
-    Strips extra whitespace, tries exact match first, then
-    case-insensitive alias lookup, finally returns the original.
-    """
 RELATION_GEN = {
     "Great-grandfather": -3, "Great-grandmother": -3,
     "Paternal Grandfather": -2, "Paternal Grandmother": -2,
@@ -531,9 +555,9 @@ INVERSE_RELATION = {
     "Mother":           "Son",
     "Stepfather":       "Stepson",
     "Stepmother":       "Stepson",
-    # Siblings ↔ Siblings
-    "Brother":          "Brother",
-    "Sister":           "Sister",
+    # Siblings ↔ Siblings  (gender-refined by get_inverse_relation)
+    "Brother":          "Brother",   # refined to "Sister" if target is female
+    "Sister":           "Sister",    # refined to "Brother" if target is male
     "Stepbrother":      "Stepbrother",
     "Stepsister":       "Stepsister",
     # Spouse ↔ Spouse
@@ -736,7 +760,6 @@ def relation_selectbox(label: str, key: str, default: str = "Son") -> str:
         chosen_group = st.selectbox(
             "Category",
             options=group_names,
-            index=group_names.index(st.session_state[group_key]),
             key=group_key,
         )
     rels_in_group = RELATION_GROUPS[chosen_group]
@@ -769,7 +792,7 @@ def process_photo(uploaded_file, size=150) -> tuple:
         b64 = base64.b64encode(buf.getvalue()).decode()
         return f"data:image/jpeg;base64,{b64}", None
     except Exception as e:
-        return None, f"Could not process image: {e}"
+        return None, "Could not process image. Please try a different file."
 
 def process_photo_rect(uploaded_file, max_w=800, max_h=600) -> tuple:
     """For album photos — keep aspect ratio, just resize large images."""
@@ -784,7 +807,7 @@ def process_photo_rect(uploaded_file, max_w=800, max_h=600) -> tuple:
         b64 = base64.b64encode(buf.getvalue()).decode()
         return f"data:image/jpeg;base64,{b64}", None
     except Exception as e:
-        return None, f"Could not process image: {e}"
+        return None, "Could not process image. Please try a different file."
 
 def avatar_html(photo_data, initials, size=72):
     if photo_data:
@@ -795,12 +818,12 @@ def avatar_html(photo_data, initials, size=72):
         )
     font = max(12, size // 2 - 4)
     return (
-        f'<div style="width:{size}px;height:{size}px;border-radius:50%;'
+        f'<span style="width:{size}px;height:{size}px;border-radius:50%;'
         f'background:linear-gradient(135deg,var(--bark),var(--moss));'
-        f'display:flex;align-items:center;justify-content:center;'
+        f'display:inline-flex;align-items:center;justify-content:center;'
         f'font-family:\'Cormorant Garamond\',serif;font-size:{font}px;'
         f'color:var(--gold);flex-shrink:0;border:2.5px solid var(--gold);">'
-        f'{initials}</div>'
+        f'{initials}</span>'
     )
 
 # ── CSS ────────────────────────────────────────────────────────────────────────
@@ -846,7 +869,7 @@ header[data-testid="stHeader"]{background:transparent!important;}
 .msg-error  {background:#FDECEA;border-left:4px solid #C0392B;border-radius:8px;padding:.85rem 1rem;margin:.7rem 0;color:#922B21;font-size:.88rem;}
 .msg-info   {background:#EAF0FB;border-left:4px solid #3B6ECA;border-radius:8px;padding:.85rem 1rem;margin:.7rem 0;color:#1A3A6E;font-size:.88rem;}
 
-.otp-display{background:#FDF3DC;border:2px dashed var(--gold);border-radius:10px;padding:1rem;text-align:center;font-family:'Courier New',monospace;font-size:2rem;font-weight:bold;color:var(--rust);letter-spacing:8px;margin:1rem 0;}
+
 .fancy-divider{border:none;height:1px;background:linear-gradient(to right,transparent,var(--parchment),transparent);margin:1.2rem 0;}
 
 /* Rel chips */
@@ -854,8 +877,8 @@ header[data-testid="stHeader"]{background:transparent!important;}
 .rel-type{font-weight:600;color:var(--bark);min-width:110px;}
 
 /* Buttons */
-[data-testid="stButton"]>button{border-radius:8px!important;font-family:'DM Sans',sans-serif!important;font-weight:500!important;font-size:.86rem!important;}
-[data-testid="stButton"]>button[kind="primary"]{background:linear-gradient(135deg,var(--bark),var(--moss))!important;border:none!important;color:white!important;}
+[data-testid="stButton"]>button{border-radius:8px!important;font-family:'DM Sans',sans-serif!important;font-weight:500!important;font-size:.86rem!important;background:#ffffff!important;color:#1C1C1C!important;border:1.5px solid #E8E0D4!important;}
+[data-testid="stButton"]>button[kind="primary"]{background:linear-gradient(135deg,#5C3D2E,#3B5249)!important;border:none!important;color:#ffffff!important;}
 
 /* Dashboard banner */
 .namaste-banner{background:linear-gradient(120deg,var(--bark) 0%,#7A4F35 40%,var(--moss) 100%);border-radius:16px;padding:1.6rem 1.8rem;display:flex;align-items:center;gap:1.4rem;margin-bottom:1.2rem;position:relative;overflow:hidden;}
@@ -946,7 +969,7 @@ header[data-testid="stHeader"]{background:transparent!important;}
 .diary-entry:hover{border-color:var(--gold);}
 .diary-date{font-size:.72rem;text-transform:uppercase;letter-spacing:1.2px;color:var(--mist);margin-bottom:.3rem;}
 .diary-title{font-family:'Cormorant Garamond',serif;font-size:1.2rem;font-weight:700;color:var(--bark);margin-bottom:.4rem;}
-.diary-preview{font-size:.86rem;color:#555;line-height:1.55;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}
+.diary-preview{font-size:.86rem;color:var(--mist);line-height:1.55;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}
 .diary-mood{font-size:1.2rem;float:right;margin-left:.5rem;}
 .diary-full-content{font-size:.92rem;line-height:1.75;color:var(--ink);white-space:pre-wrap;}
 
@@ -960,7 +983,7 @@ header[data-testid="stHeader"]{background:transparent!important;}
 .tl-event-type{font-size:.7rem;text-transform:uppercase;letter-spacing:1.2px;color:var(--mist);margin-bottom:.2rem;}
 .tl-title{font-family:'Cormorant Garamond',serif;font-size:1.1rem;font-weight:700;color:var(--bark);}
 .tl-date{font-size:.78rem;color:var(--mist);}
-.tl-desc{font-size:.84rem;color:#555;margin-top:.4rem;line-height:1.5;}
+.tl-desc{font-size:.84rem;color:var(--mist);margin-top:.4rem;line-height:1.5;}
 .tl-loc{font-size:.76rem;color:var(--mist);margin-top:.3rem;}
 
 /* Photo upload zone */
@@ -976,13 +999,46 @@ header[data-testid="stHeader"]{background:transparent!important;}
 
 /* Slideshow */
 .slideshow-img{width:100%;max-height:500px;object-fit:contain;border-radius:12px;background:#1a1a1a;}
+
+@media (prefers-color-scheme: dark) {
+  :root{
+    --cream:#1A1612; --parchment:#2A2320; --bark:#E8C99A; --moss:#7DBF9E;
+    --gold:#E8B84B; --rust:#E8845A; --ink:#F0EBE1; --mist:#A8B8AA;
+    --shadow:rgba(0,0,0,0.40); --card-bg:#242018;
+  }
+  html,body,[data-testid="stAppViewContainer"]{background:var(--cream)!important;color:var(--ink)!important;}
+  .card,.stat-card,.feed-card,.dp-section,.member-card,.member-list-row,
+  .album-card,.diary-entry,.tl-card,.filter-strip,.profile-modal,
+  .search-result,.rel-chip,.dp-rel-card{background:var(--card-bg)!important;border-color:var(--parchment)!important;}
+  .member-list-row:hover{background:#2E2820!important;}
+  .photo-upload-zone{background:#2A2218!important;border-color:var(--gold)!important;}
+  .badge-gold{background:#3A2E10!important;color:#E8C47A!important;border-color:#8A6A20!important;}
+  .badge-green{background:#0F2A1A!important;color:#7DBF9E!important;border-color:#2A6A4A!important;}
+  .badge-blue{background:#0F1A3A!important;color:#7A9AE8!important;border-color:#2A4AAA!important;}
+  .badge-purple{background:#1A0F3A!important;color:#A87AE8!important;border-color:#5A2AAA!important;}
+  .badge-red{background:#3A0F0F!important;color:#E87A7A!important;border-color:#AA2A2A!important;}
+  .msg-success{background:#0F2A1A!important;border-color:var(--moss)!important;color:#7DBF9E!important;}
+  .msg-error{background:#2A0F0F!important;border-color:#C0392B!important;color:#E87A7A!important;}
+  .msg-info{background:#0F1A3A!important;border-color:#3B6ECA!important;color:#7A9AE8!important;}
+  .fancy-divider{background:linear-gradient(to right,transparent,var(--parchment),transparent)!important;}
+  .diary-preview,.tl-desc{color:var(--mist)!important;}
+  .dp-stat-num,.stat-num,.card-title,.dp-section-title,.member-card-name,
+  .member-list-name,.diary-title,.tl-title,.album-title,.feed-title,
+  .dp-hero-name,.namaste-title,.dp-rel-name,.rel-type{color:var(--bark)!important;}
+  .tl-dot{border-color:var(--card-bg)!important;}
+  [data-testid="stButton"]>button{background:var(--card-bg)!important;color:var(--ink)!important;border-color:var(--parchment)!important;}
+  [data-testid="stButton"]>button[kind="primary"]{background:linear-gradient(135deg,var(--bark),var(--moss))!important;color:#1A1612!important;}
+  [data-baseweb="tab-list"]{border-color:var(--parchment)!important;}
+  [data-testid="stTextInput"] input,[data-testid="stTextArea"] textarea,
+  [data-baseweb="select"] div{background:var(--card-bg)!important;color:var(--ink)!important;border-color:var(--parchment)!important;}
+}
 </style>
 """, unsafe_allow_html=True)
 
 # ── Session state ─────────────────────────────────────────────────────────────
 _defaults = {
     "page": "landing", "user": None,
-    "otp": None, "otp_email": None,
+    "otp_email": None,
     "reg_step": 1, "reg_data": {},
     "msg": None, "msg_type": "info",
     "viewed_profile": None,
@@ -1062,11 +1118,10 @@ def ensure_dob(val):
 def page_landing():
     render_hero()
     if _db_error:
-        st.markdown(f'<div class="msg-error">🔌 DB not connected: {_db_error}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="msg-error">🔌 DB not connected. Please try again later.</div>', unsafe_allow_html=True)
 
     c1, c2, c3 = st.columns([1, 1.2, 1])
     with c2:
-        st.markdown('<div class="card">', unsafe_allow_html=True)
         st.markdown('<div class="card-title">Welcome</div>', unsafe_allow_html=True)
         a, b = st.columns(2)
         with a:
@@ -1075,7 +1130,6 @@ def page_landing():
         with b:
             if st.button("✨ Register", use_container_width=True):
                 goto("register"); st.rerun()
-        st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown("---")
     cols = st.columns(3)
@@ -1095,10 +1149,9 @@ def page_login():
     render_hero(); show_msg()
     c1, c2, c3 = st.columns([1, 1.4, 1])
     with c2:
-        st.markdown('<div class="card">', unsafe_allow_html=True)
         st.markdown('<div class="card-title">🔑 Sign In</div>', unsafe_allow_html=True)
-        email    = st.text_input("Email", placeholder="your@email.com", key="li_email")
-        password = st.text_input("Password", type="password", placeholder="••••••••", key="li_pass")
+        email    = st.text_input("Email", placeholder="", key="li_email")
+        password = st.text_input("Password", type="password", placeholder="", key="li_pass")
 
         if st.button("Login", type="primary", use_container_width=True):
             if not email or not password:
@@ -1125,7 +1178,6 @@ def page_login():
             if st.button("← Back", use_container_width=True): goto("landing"); st.rerun()
         with b2:
             if st.button("Register →", use_container_width=True): goto("register"); st.rerun()
-        st.markdown('</div>', unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # REGISTER — 3-step wizard
@@ -1133,24 +1185,22 @@ def page_login():
 def page_register():
     render_hero(); show_msg()
     step = st.session_state.reg_step
-    st.progress(step / 3, text=f"Step {step} of 3")
+    st.progress(step / 2, text=f"Step {step} of 2")
     if step == 1: _step1()
-    elif step == 2: _step2()
-    else: _step3()
+    else: _step2()
 
 def _step1():
     c1, c2, c3 = st.columns([.5, 2, .5])
     with c2:
-        st.markdown('<div class="card">', unsafe_allow_html=True)
         st.markdown('<div class="card-title">👤 Account Details</div>', unsafe_allow_html=True)
         d = st.session_state.reg_data
-        full_name = st.text_input("Full Name *",    value=d.get("full_name", ""),    placeholder="e.g. Arjun Sharma")
-        email     = st.text_input("Email *",        value=d.get("email", ""),        placeholder="you@example.com")
-        pass1     = st.text_input("Password *",     type="password",                 placeholder="Min 8 characters")
-        pass2     = st.text_input("Confirm Pwd *",  type="password",                 placeholder="Repeat password")
-        dob_val   = ensure_dob(d["dob"]) if d.get("dob") else date(1990, 1, 1)
-        dob       = st.date_input("Date of Birth *", value=dob_val, min_value=date(1900, 1, 1), max_value=date.today())
-        dynasty   = st.text_input("Dynasty Name *", value=d.get("dynasty_name", ""), placeholder="e.g. Sharma, Reddy, Patel…")
+        full_name = st.text_input("Full Name *",    value=d.get("full_name", ""),    placeholder="")
+        email     = st.text_input("Email *",        value=d.get("email", ""),        placeholder="")
+        pass1     = st.text_input("Password *",     type="password",                 placeholder="")
+        pass2     = st.text_input("Confirm Password *",  type="password",                 placeholder="")
+        dob_val   = ensure_dob(d["dob"]) if d.get("dob") else None
+        dob       = st.date_input("Date of Birth *", value=dob_val, min_value=date(1600, 1, 1), max_value=date.today(), format="DD/MM/YYYY")
+        dynasty   = st.text_input("Dynasty Name *", value=d.get("dynasty_name", ""), placeholder="")
         st.caption("🏰 Dynasty name connects you with other family members.")
 
         b1, b2 = st.columns(2)
@@ -1164,7 +1214,7 @@ def _step1():
                 if len(pass1) < 8: errs.append("Password ≥ 8 chars")
                 if pass1 != pass2: errs.append("Passwords don't match")
                 if not dynasty.strip(): errs.append("Dynasty Name required")
-                if calc_age(dob) < 5: errs.append("Invalid date of birth")
+                if dob is None: errs.append("Date of birth required")
                 if errs:
                     set_msg("• " + "<br>• ".join(errs), "error")
                 elif db_ok() and get_user_email(email):
@@ -1174,29 +1224,28 @@ def _step1():
                               "password": pass1, "dob": dob.isoformat(), "dynasty_name": dynasty.strip()})
                     st.session_state.reg_step = 2
                 st.rerun()
-        st.markdown('</div>', unsafe_allow_html=True)
 
 def _step2():
     c1, c2, c3 = st.columns([.5, 2, .5])
     with c2:
-        st.markdown('<div class="card">', unsafe_allow_html=True)
         st.markdown('<div class="card-title">📋 Profile Details <span style="font-size:.8rem;color:var(--mist);">(Optional)</span></div>', unsafe_allow_html=True)
         d = st.session_state.reg_data
         opts         = ["Prefer not to say", "Male", "Female", "Other"]
         gender       = st.selectbox("Gender", opts, index=opts.index(d.get("gender", "Prefer not to say")))
-        birth_city   = st.text_input("Birth City",   value=d.get("birth_city", ""),   placeholder="e.g. Hyderabad")
-        current_city = st.text_input("Current City", value=d.get("current_city", ""), placeholder="e.g. Bangalore")
-        occupation   = st.text_input("Occupation",   value=d.get("occupation", ""),   placeholder="Engineer, Teacher…")
+        birth_city   = st.text_input("Birth City",   value=d.get("birth_city", ""),   placeholder="")
+        current_city = st.text_input("Current City", value=d.get("current_city", ""), placeholder="")
+        occupation   = st.text_input("Occupation",   value=d.get("occupation", ""),   placeholder="")
+        religion     = st.text_input("Religion",     value=d.get("religion", ""),     placeholder="")
+        caste        = st.text_input("Caste",        value=d.get("caste", ""),        placeholder="")
+        gotram       = st.text_input("Gotram",       value=d.get("gotram", ""),       placeholder="")
 
         st.markdown('<hr class="fancy-divider">', unsafe_allow_html=True)
         st.markdown("**📷 Profile Photo** *(optional)*")
-        st.markdown('<div class="photo-upload-zone">', unsafe_allow_html=True)
         photo_file = st.file_uploader(
             "Upload a photo (JPG/PNG, max 800 KB)",
             type=["jpg", "jpeg", "png", "webp"],
             key="reg_photo", label_visibility="collapsed",
         )
-        st.markdown('</div>', unsafe_allow_html=True)
 
         if photo_file:
             photo_data, err = process_photo(photo_file)
@@ -1205,8 +1254,9 @@ def _step2():
             else:
                 d["profile_photo"] = photo_data
                 initials = "".join(p[0].upper() for p in d.get("full_name", "?").split()[:2]) or "?"
+                _reg_av = avatar_html(photo_data, initials, 80)
                 st.markdown(
-                    f'<div class="photo-preview-wrap">{avatar_html(photo_data, initials, 80)}'
+                    f'<div class="photo-preview-wrap">{_reg_av}'
                     f'<span style="font-size:.76rem;color:var(--mist);">Preview</span></div>',
                     unsafe_allow_html=True)
 
@@ -1214,72 +1264,34 @@ def _step2():
         with b1:
             if st.button("← Back", use_container_width=True): st.session_state.reg_step = 1; st.rerun()
         with b2:
-            if st.button("Continue →", type="primary", use_container_width=True):
+            if st.button("✅ Register", type="primary", use_container_width=True):
                 d.update({"gender": gender, "birth_city": birth_city.strip(),
-                          "current_city": current_city.strip(), "occupation": occupation.strip()})
-                otp = gen_otp()
-                st.session_state.otp       = otp
-                st.session_state.otp_email = d["email"]
+          "current_city": current_city.strip(), "occupation": occupation.strip(),
+          "religion": religion.strip(), "caste": caste.strip(), "gotram": gotram.strip()})
                 if db_ok():
-                    q_exec("""INSERT INTO otp_store(email,otp,expires_at)
-                               VALUES(%s,%s,%s)
-                               ON CONFLICT(email) DO UPDATE
-                               SET otp=EXCLUDED.otp, expires_at=EXCLUDED.expires_at""",
-                           (d["email"], otp, datetime.utcnow() + timedelta(minutes=10)))
-                st.session_state.reg_step = 3
-                st.rerun()
-        st.markdown('</div>', unsafe_allow_html=True)
-
-def _step3():
-    c1, c2, c3 = st.columns([.5, 2, .5])
-    with c2:
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.markdown('<div class="card-title">📧 Verify Email</div>', unsafe_allow_html=True)
-        email = st.session_state.otp_email
-        st.markdown(f"OTP sent to **{email}**.")
-        if st.session_state.otp:
-            st.markdown(f'<div class="msg-info">📌 <strong>Demo Mode</strong> — Your OTP:</div>'
-                        f'<div class="otp-display">{st.session_state.otp}</div>', unsafe_allow_html=True)
-
-        otp_in = st.text_input("Enter OTP", placeholder="6-digit code", max_chars=6)
-        show_msg()
-
-        b1, b2 = st.columns(2)
-        with b1:
-            if st.button("← Back", use_container_width=True): st.session_state.reg_step = 2; st.rerun()
-        with b2:
-            if st.button("✅ Verify & Register", type="primary", use_container_width=True):
-                if not otp_in.strip():
-                    set_msg("Enter OTP.", "error")
-                elif otp_in.strip() != st.session_state.otp:
-                    set_msg("Wrong OTP.", "error")
+                    try:
+                        row = q_exec_return("""
+                            INSERT INTO users(full_name,email,password,dob,dynasty_name,
+                                              gender,birth_city,current_city,occupation,
+                                              religion,caste,gotram,
+                                              profile_photo,verified)
+                            VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,TRUE) RETURNING *""",
+                            (d["full_name"], d["email"], hash_pw(d["password"]),
+                             d["dob"], d["dynasty_name"], d.get("gender", ""),
+                             d.get("birth_city", ""), d.get("current_city", ""),
+                             d.get("occupation", ""), d.get("religion", ""),
+                             d.get("caste", ""), d.get("gotram", ""),
+                             d.get("profile_photo", "")))
+                        st.session_state.user     = dict(row)
+                        st.session_state.reg_data = {}
+                        st.session_state.reg_step = 1
+                        set_msg(f"Welcome, {d['full_name']}! 🌳", "success")
+                        goto("dashboard")
+                    except Exception as e:
+                        set_msg("Registration failed. Please try again.", "error")
                 else:
-                    d = st.session_state.reg_data
-                    if db_ok():
-                        try:
-                            row = q_exec_return("""
-                                INSERT INTO users(full_name,email,password,dob,dynasty_name,
-                                                  gender,birth_city,current_city,occupation,
-                                                  profile_photo,verified)
-                                VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,TRUE) RETURNING *""",
-                                (d["full_name"], d["email"], hash_pw(d["password"]),
-                                 d["dob"], d["dynasty_name"], d.get("gender", ""),
-                                 d.get("birth_city", ""), d.get("current_city", ""),
-                                 d.get("occupation", ""), d.get("profile_photo", "")))
-                            q_exec("DELETE FROM otp_store WHERE email=%s", (d["email"],))
-                            st.session_state.user       = dict(row)
-                            st.session_state.otp        = None
-                            st.session_state.otp_email  = None
-                            st.session_state.reg_data   = {}
-                            st.session_state.reg_step   = 1
-                            set_msg(f"Welcome, {d['full_name']}! 🌳", "success")
-                            goto("dashboard")
-                        except Exception as e:
-                            set_msg(f"Registration failed: {e}", "error")
-                    else:
-                        set_msg("DB not connected.", "error")
+                    set_msg("DB not connected.", "error")
                 st.rerun()
-        st.markdown('</div>', unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # DASHBOARD HELPERS
@@ -1339,15 +1351,17 @@ def _render_namaste_banner(u, initials, age):
     first = u["full_name"].split()[0]
     h = datetime.utcnow().hour
     greeting = "Suprabhat" if h < 12 else ("Namaste" if h < 17 else "Shubh Sandhya")
+    _banner_av   = avatar_html(u.get("profile_photo") or None, initials, 60)
+    _city_info   = f"&nbsp;·&nbsp; 🏙️ {_esc(u['current_city'])}" if u.get('current_city') else "&nbsp;·&nbsp; 🏙️ —"
+    _occ_info    = f"&nbsp;·&nbsp; 💼 {_esc(u['occupation'])}" if u.get('occupation') else ""
     st.markdown(f"""
     <div class="namaste-banner">
-        {avatar_html(u.get("profile_photo") or None, initials, 60)}
+        {_banner_av}
         <div>
-            <div class="namaste-title">{greeting}, {first}! 🙏</div>
+            <div class="namaste-title">{_esc(greeting)}, {_esc(first)}! 🙏</div>
             <div class="namaste-sub">
-                🏰 {u['dynasty_name']} Dynasty &nbsp;·&nbsp; 🎂 Age {age}
-                {f"&nbsp;·&nbsp; 🏙️ {u['current_city']}" if u.get('current_city') else ""}
-                {f"&nbsp;·&nbsp; 💼 {u['occupation']}" if u.get('occupation') else ""}
+                🏰 {_esc(u['dynasty_name'])} Dynasty &nbsp;·&nbsp; 🎂 Age {age}
+                {_city_info}{_occ_info}
             </div>
         </div>
     </div>""", unsafe_allow_html=True)
@@ -1385,21 +1399,24 @@ def _detailed_profile_tab(current_uid):
         if st.button("← Back to my profile", key="dp_back"):
             st.session_state.dp_target_uid = None; st.rerun()
 
+    _age_meta    = f"&nbsp;·&nbsp; 🎂 Age {age}" if priv_dob or is_self else ""
+    _city_meta   = f"&nbsp;·&nbsp; 🏙️ {_esc(u['current_city'])}" if (priv_city or is_self) and u.get('current_city') else ("&nbsp;·&nbsp; 🏙️ —" if is_self else "")
+    _verified_b  = '<span class="badge badge-green">✓ Verified</span>' if u.get("verified") else ""
+    _occ_b       = f'<span class="badge badge-blue">💼 {_esc(u["occupation"])}</span>' if (priv_occ or is_self) and u.get("occupation") else ""
+    _hero_av     = avatar_html(u.get("profile_photo") or None, initials, 90)
     st.markdown(f"""
     <div class="dp-hero">
         <div style="display:flex;align-items:center;gap:1.4rem;">
-            {avatar_html(u.get("profile_photo") or None, initials, 90)}
+            {_hero_av}
             <div>
-                <div class="dp-hero-name">{u['full_name']}</div>
+                <div class="dp-hero-name">{_esc(u['full_name'])}</div>
                 <div class="dp-hero-meta">
-                    🏰 {u['dynasty_name']} &nbsp;·&nbsp; {_infer_generation(age)}
-                    {f"&nbsp;·&nbsp; 🎂 Age {age}" if priv_dob or is_self else ""}
-                    {f"&nbsp;·&nbsp; 🏙️ {u['current_city']}" if (priv_city or is_self) and u.get('current_city') else ""}
+                    🏰 {_esc(u['dynasty_name'])} &nbsp;·&nbsp; {_infer_generation(age)}
+                    {_age_meta}{_city_meta}
                 </div>
                 <div style="margin-top:.55rem;display:flex;flex-wrap:wrap;gap:.3rem;">
                     <span class="badge badge-gold">🌳 {len(links)} Family Links</span>
-                    {'<span class="badge badge-green">✓ Verified</span>' if u.get("verified") else ""}
-                    {f'<span class="badge badge-blue">💼 {u["occupation"]}</span>' if (priv_occ or is_self) and u.get("occupation") else ""}
+                    {_verified_b}{_occ_b}
                 </div>
             </div>
         </div>
@@ -1425,7 +1442,6 @@ def _detailed_profile_tab(current_uid):
 
     col_left, col_right = st.columns([3, 2])
     with col_left:
-        st.markdown('<div class="dp-section">', unsafe_allow_html=True)
         st.markdown('<div class="dp-section-title">👤 Personal Details</div>', unsafe_allow_html=True)
         details = []
         if priv_dob or is_self:
@@ -1434,6 +1450,9 @@ def _detailed_profile_tab(current_uid):
         if u.get("birth_city"): details.append(("🏡 Birth City", u["birth_city"]))
         if (priv_city or is_self) and u.get("current_city"): details.append(("🏙️ Current City", u["current_city"]))
         if (priv_occ  or is_self) and u.get("occupation"):   details.append(("💼 Occupation", u["occupation"]))
+        if u.get("religion"):  details.append(("🛕 Religion", u["religion"]))
+        if u.get("caste"):     details.append(("🏷️ Caste",    u["caste"]))
+        if u.get("gotram"):    details.append(("🔱 Gotram",   u["gotram"]))
         if priv_email or is_self: details.append(("📧 Email", u.get("email", "—")))
         if u.get("created_at"): details.append(("📅 Member Since", u["created_at"].strftime("%B %Y")))
         for k, v in details:
@@ -1442,11 +1461,9 @@ def _detailed_profile_tab(current_uid):
                 <span style="font-size:.72rem;text-transform:uppercase;letter-spacing:1px;color:var(--mist);">{k}</span>
                 <span style="font-size:.86rem;font-weight:500;color:var(--ink);">{v}</span>
             </div>""", unsafe_allow_html=True)
-        st.markdown('</div>', unsafe_allow_html=True)
 
         bio = u.get("bio", "")
         if bio or is_self:
-            st.markdown('<div class="dp-section">', unsafe_allow_html=True)
             st.markdown('<div class="dp-section-title">📖 About</div>', unsafe_allow_html=True)
             if bio:
                 st.markdown(f'<div class="dp-bio">{_esc(bio)}</div>', unsafe_allow_html=True)
@@ -1457,12 +1474,11 @@ def _detailed_profile_tab(current_uid):
                     new_bio = st.text_area("Your bio (max 300 chars)", value=bio, max_chars=300, key="dp_bio_edit")
                     if st.button("Save Bio", key="dp_bio_save", type="primary"):
                         q_exec("UPDATE users SET bio=%s WHERE id=%s", (new_bio.strip(), current_uid))
+                        get_user.clear()
                         st.session_state.user = dict(get_user(current_uid))
                         set_msg("Bio updated! ✨", "success"); st.rerun()
-            st.markdown('</div>', unsafe_allow_html=True)
 
     with col_right:
-        st.markdown('<div class="dp-section">', unsafe_allow_html=True)
         st.markdown('<div class="dp-section-title">👨‍👩‍👧‍👦 Family Relations</div>', unsafe_allow_html=True)
         if links:
             grouped = {}
@@ -1480,18 +1496,17 @@ def _detailed_profile_tab(current_uid):
                             try: lk_age_str = f" · {calc_age(ensure_dob(lk['linked_dob']))}y"
                             except: pass
                         verified_badge = "✓" if lk.get("member_id") else ""
+                        _lk_av = avatar_html(lk.get("linked_photo") or None, lk_init, 32)
                         st.markdown(f"""
                         <div class="dp-rel-card">
-                            {avatar_html(lk.get("linked_photo") or None, lk_init, 32)}
-                            <div><div class="dp-rel-name">{name} {verified_badge}</div>
-                            <div class="dp-rel-type">{rel}{lk_age_str}</div></div>
+                            {_lk_av}
+                            <div><div class="dp-rel-name">{_esc(name)} {verified_badge}</div>
+                            <div class="dp-rel-type">{_esc(rel)}{lk_age_str}</div></div>
                         </div>""", unsafe_allow_html=True)
         else:
             st.markdown('<div style="color:var(--mist);font-size:.86rem;">No relations added yet.</div>', unsafe_allow_html=True)
-        st.markdown('</div>', unsafe_allow_html=True)
 
         if is_self:
-            st.markdown('<div class="dp-section">', unsafe_allow_html=True)
             st.markdown('<div class="dp-section-title">🔒 Privacy</div>', unsafe_allow_html=True)
             st.markdown('<div style="font-size:.76rem;color:var(--mist);margin-bottom:.7rem;">Control what others can see</div>', unsafe_allow_html=True)
 
@@ -1506,6 +1521,7 @@ def _detailed_profile_tab(current_uid):
                     if field not in _PRIVACY_COLS:
                         raise ValueError(f"Illegal column: {field}")
                     q_exec(f"UPDATE users SET {field}=%s WHERE id=%s", (new_val, current_uid))
+                    get_user.clear()
                     st.session_state.user = dict(get_user(current_uid)); st.rerun()
 
             privacy_toggle("Show Date of Birth", "Visible to all members", "privacy_dob", priv_dob, "priv_dob_tog")
@@ -1515,7 +1531,6 @@ def _detailed_profile_tab(current_uid):
             privacy_toggle("Show City", "Current city visible", "privacy_city", priv_city, "priv_city_tog")
             st.markdown('<hr class="fancy-divider">', unsafe_allow_html=True)
             privacy_toggle("Show Occupation", "Job/career visible", "privacy_occ", priv_occ, "priv_occ_tog")
-            st.markdown('</div>', unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 2.5  INTERACTIVE FAMILY TREE
@@ -1949,15 +1964,11 @@ def _build_tree_data(uid):
     nodes[self_id]["_sibChildren"]     = sib_children
     nodes[self_id]["_siblingCouples"]  = ([[sister_id, bil_id]] if (sister_id and bil_id) else
                                           ([[sister_id, None]] if sister_id else []))
-    # Ancestor couple list for JS marriage bars and directed edges
-    # child_nid is included so JS draws the edge to the CORRECT blood child
-    # (e.g. Maternal Grandfather → Narsamma/Mother, NOT nearest node by X)
     nodes[self_id]["_ancestorCouples"] = [
         {"nid_a": ac["nid_a"], "nid_b": ac["nid_b"], "gen": ac["gen"],
-         "child_nid": ac["child_nid"]}
+         "child_nid": ac["child_nid"], "isSibPil": ac.get("isSibPil", False)}  
         for ac in ancestor_couples
     ]
-
     return nodes, self_id
 
 
@@ -2260,23 +2271,25 @@ function drawEdges(){{
     if(!pa||!pb) continue;
     parentCoupleHandled.add(ac.nid_a); parentCoupleHandled.add(ac.nid_b);
     const unionX = (pa.x + pb.x) / 2;
-    const unionY = pa.y;  // both at same Y
+    const unionY = pa.y;
+    const stemY = unionY + NH/2;
 
-    if(bloodNodes.length){{
-      // Stem from couple bottom down to children
+    if(bloodNodes.length === 1){{
+      // Sirf ek child — seedha elbow: couple midpoint se child tak
+      // Isse unionX aur child.x ka gap cover hota hai
+      const child = bloodNodes[0];
+      elbow(unionX, stemY, child.x, child.y - NH/2, parentCol+'99');
+    }} else if(bloodNodes.length > 1){{
+      // Multiple children — T-bar
       const bxs  = bloodNodes.map(n=>n.x);
       const barX1= Math.min(...bxs), barX2=Math.max(...bxs);
-      const stemY = unionY + NH/2;
       const barY  = (stemY + bloodNodes[0].y - NH/2) / 2;
+      const midBar = (barX1+barX2)/2;
 
-      // Vertical stem from union midpoint
-      const vl=svgEl('line');
-      vl.setAttribute('x1',unionX); vl.setAttribute('y1',stemY);
-      vl.setAttribute('x2',unionX); vl.setAttribute('y2',barY);
-      vl.setAttribute('stroke',parentCol+'99'); vl.setAttribute('stroke-width','1.8');
-      svg.appendChild(vl);
+      // Stem from unionX down to barY, then elbow to midBar if needed
+      elbow(unionX, stemY, midBar, barY, parentCol+'99');
 
-      // Horizontal bar spanning children
+      // Horizontal bar
       const hBar=svgEl('line');
       hBar.setAttribute('x1',barX1); hBar.setAttribute('y1',barY);
       hBar.setAttribute('x2',barX2); hBar.setAttribute('y2',barY);
@@ -2297,38 +2310,38 @@ function drawEdges(){{
   // Fallback: any unpaired parent nodes use the old shared-bar approach
   const unpairedParents = parentNodes.filter(n=>!parentCoupleHandled.has(n.id));
   if(unpairedParents.length && bloodNodes.length){{
-    const parBottomY = unpairedParents[0].y + NH/2;
-    const bloodTopY  = bloodNodes[0].y  - NH/2;
-    const barY = (parBottomY + bloodTopY) / 2;
+    if(bloodNodes.length === 1){{
+      // Sirf ek child (You, koi sibling nahi) — seedha parent se child tak line
+      for(const par of unpairedParents){{
+        elbow(par.x, par.y+NH/2, bloodNodes[0].x, bloodNodes[0].y-NH/2, parentCol+'99');
+      }}
+    }} else {{
+      // Multiple children — T-bar approach
+      const parBottomY = unpairedParents[0].y + NH/2;
+      const bloodTopY  = bloodNodes[0].y  - NH/2;
+      const barY = (parBottomY + bloodTopY) / 2;
 
-    const bxs  = bloodNodes.map(n=>n.x);
-    const barX1= Math.min(...bxs), barX2=Math.max(...bxs);
+      const bxs  = bloodNodes.map(n=>n.x);
+      const barX1= Math.min(...bxs), barX2=Math.max(...bxs);
 
-    const hBar=svgEl('line');
-    hBar.setAttribute('x1',barX1); hBar.setAttribute('y1',barY);
-    hBar.setAttribute('x2',barX2); hBar.setAttribute('y2',barY);
-    hBar.setAttribute('stroke',parentCol+'99'); hBar.setAttribute('stroke-width','1.8');
-    svg.appendChild(hBar);
+      const hBar=svgEl('line');
+      hBar.setAttribute('x1',barX1); hBar.setAttribute('y1',barY);
+      hBar.setAttribute('x2',barX2); hBar.setAttribute('y2',barY);
+      hBar.setAttribute('stroke',parentCol+'99'); hBar.setAttribute('stroke-width','1.8');
+      svg.appendChild(hBar);
 
-    for(const c of bloodNodes){{
-      const dl=svgEl('line');
-      dl.setAttribute('x1',c.x); dl.setAttribute('y1',barY);
-      dl.setAttribute('x2',c.x); dl.setAttribute('y2',c.y-NH/2);
-      dl.setAttribute('stroke',parentCol+'99'); dl.setAttribute('stroke-width','1.8');
-      svg.appendChild(dl);
-    }}
+      for(const c of bloodNodes){{
+        const dl=svgEl('line');
+        dl.setAttribute('x1',c.x); dl.setAttribute('y1',barY);
+        dl.setAttribute('x2',c.x); dl.setAttribute('y2',c.y-NH/2);
+        dl.setAttribute('stroke',parentCol+'99'); dl.setAttribute('stroke-width','1.8');
+        svg.appendChild(dl);
+      }}
 
-    for(const par of unpairedParents){{
-      const px=par.x, py=par.y+NH/2;
-      const bx=Math.max(barX1, Math.min(barX2, px));
-      if(Math.abs(px-bx)<1){{
-        const vl=svgEl('line');
-        vl.setAttribute('x1',px); vl.setAttribute('y1',py);
-        vl.setAttribute('x2',px); vl.setAttribute('y2',barY);
-        vl.setAttribute('stroke',parentCol+'99'); vl.setAttribute('stroke-width','1.8');
-        svg.appendChild(vl);
-      }} else {{
-        elbow(px,py,bx,barY,parentCol+'99');
+      for(const par of unpairedParents){{
+        const px=par.x, py=par.y+NH/2;
+        const midBar=(barX1+barX2)/2;
+        elbow(px, py, midBar, barY, parentCol+'99');
       }}
     }}
   }}
@@ -2607,8 +2620,8 @@ buildInfo();
 // resetView needs real viewport dimensions. Inside a Streamlit tab the iframe
 // is hidden (display:none or zero-size) until the user clicks the tab, so
 // requestAnimationFrame fires when clientWidth/clientHeight are still 0 and
-// the tree ends up invisible. Use ResizeObserver to re-run resetView the first
-// time the viewport actually has a non-zero size.
+// the tree ends up invisible. Use ResizeObserver + staggered setTimeouts to
+// re-run resetView the first time the viewport actually has a non-zero size.
 let _booted = false;
 function _boot() {{
   if (_booted) return;
@@ -2621,6 +2634,11 @@ function _boot() {{
 }}
 // Try immediately in case the tab is already visible
 requestAnimationFrame(_boot);
+// Staggered fallbacks for browsers that don't fire ResizeObserver reliably
+// when a hidden Streamlit tab becomes visible
+setTimeout(_boot, 500);
+setTimeout(_boot, 1200);
+setTimeout(_boot, 2500);
 // Also watch for when the element is resized into view (tab click)
 if (typeof ResizeObserver !== 'undefined') {{
   const ro = new ResizeObserver(() => {{
@@ -2646,52 +2664,66 @@ def _dynasty_search_tab(uid):
         vp_dob  = ensure_dob(vp["dob"])
         vp_age  = calc_age(vp_dob)
         vp_init = "".join(p[0].upper() for p in vp["full_name"].split()[:2])
-        st.markdown('<div class="profile-modal">', unsafe_allow_html=True)
-        col_av, col_info = st.columns([1, 3])
-        with col_av:
-            st.markdown(avatar_html(vp.get("profile_photo") or None, vp_init, 86), unsafe_allow_html=True)
-        with col_info:
-            st.markdown(f'<div style="font-family:\'Cormorant Garamond\',serif;font-size:1.35rem;font-weight:700;color:var(--bark);">{vp["full_name"]}</div>', unsafe_allow_html=True)
-            st.markdown(f'<span class="badge badge-gold">🏰 {vp["dynasty_name"]}</span> <span class="badge badge-green">{_infer_generation(vp_age)}</span>', unsafe_allow_html=True)
-            b1, b2 = st.columns(2)
-            with b1:
-                if st.button("✕ Close", key="close_profile"): st.session_state.viewed_profile = None; st.rerun()
-            with b2:
-                if st.button("👤 Full Profile", key="open_full_profile", type="primary"):
-                    st.session_state.dp_target_uid = vp["id"]
-                    st.session_state.viewed_profile = None
-                    st.session_state.active_tab = 0
-                    st.rerun()
-        st.markdown('<hr class="fancy-divider">', unsafe_allow_html=True)
-        details = [
+        # ── Build the entire modal as one self-contained HTML block ──────────
+        _vp_avatar   = avatar_html(vp.get("profile_photo") or None, vp_init, 86)
+        _vp_gen_badge = f'<span class="badge badge-gold">🏰 {_esc(vp["dynasty_name"])}</span> <span class="badge badge-green">{_infer_generation(vp_age)}</span>'
+        _detail_rows = [
             ("Date of Birth", vp_dob.strftime("%d %B %Y") if vp.get("privacy_dob", True) else "Hidden"),
-            ("Age", f"{vp_age} years"), ("Gender", vp.get("gender") or "—"),
-            ("Birth City", vp.get("birth_city") or "—"),
-            ("Current City", vp.get("current_city") or "—" if vp.get("privacy_city", True) else "Hidden"),
-            ("Occupation", vp.get("occupation") or "—" if vp.get("privacy_occ", True) else "Hidden"),
+            ("Age",           f"{vp_age} years"),
+            ("Gender",        vp.get("gender") or "—"),
+            ("Birth City",    vp.get("birth_city") or "—"),
+            ("Current City",  vp.get("current_city") or "—" if vp.get("privacy_city", True) else "Hidden"),
+            ("Occupation",    vp.get("occupation") or "—" if vp.get("privacy_occ", True) else "Hidden"),
         ]
-        d1, d2 = st.columns(2)
-        for i, (k, v) in enumerate(details):
-            with (d1 if i % 2 == 0 else d2):
-                st.markdown(f'<div class="profile-detail-key">{k}</div><div style="font-size:.88rem;font-weight:500;margin-bottom:.65rem;">{v}</div>', unsafe_allow_html=True)
+        _detail_html = "".join(
+            f'<div style="flex:1 1 45%;min-width:140px;">'
+            f'<div class="profile-detail-key">{k}</div>'
+            f'<div style="font-size:.88rem;font-weight:500;margin-bottom:.65rem;">{_esc(str(v))}</div>'
+            f'</div>'
+            for k, v in _detail_rows
+        )
         vp_links = get_links(vp["id"])
+        _family_html = ""
         if vp_links:
-            st.markdown('<hr class="fancy-divider">', unsafe_allow_html=True)
-            st.markdown('<div style="font-size:.76rem;text-transform:uppercase;letter-spacing:1.2px;color:var(--mist);margin-bottom:.4rem;">Known Family</div>', unsafe_allow_html=True)
-            for lk in vp_links[:6]:
-                name = lk.get("linked_name") or lk["member_name"]
-                st.markdown(f'<span class="badge badge-green">{lk["relation"]}: {name}</span>', unsafe_allow_html=True)
-        st.markdown('</div>', unsafe_allow_html=True)
-        st.markdown('<hr class="fancy-divider">', unsafe_allow_html=True)
+            _badges = "".join(
+                f'<span class="badge badge-green">{_esc(lk["relation"])}: {_esc(lk.get("linked_name") or lk["member_name"])}</span>'
+                for lk in vp_links[:6]
+            )
+            _family_html = f'<hr class="fancy-divider"><div style="font-size:.76rem;text-transform:uppercase;letter-spacing:1.2px;color:var(--mist);margin-bottom:.4rem;">Known Family</div>{_badges}'
 
-    st.markdown('<div class="search-hero">', unsafe_allow_html=True)
-    st.markdown('<div class="search-hero-title">🔍 Dynasty Search</div>', unsafe_allow_html=True)
+        st.markdown(f"""
+        <div class="profile-modal">
+            <div style="display:flex;align-items:center;gap:1.2rem;margin-bottom:.9rem;">
+                {_vp_avatar}
+                <div>
+                    <div style="font-family:'Cormorant Garamond',serif;font-size:1.35rem;font-weight:700;color:var(--bark);">{_esc(vp["full_name"])}</div>
+                    <div style="margin-top:.35rem;">{_vp_gen_badge}</div>
+                </div>
+            </div>
+            <hr class="fancy-divider">
+            <div style="display:flex;flex-wrap:wrap;gap:.3rem 1.5rem;">
+                {_detail_html}
+            </div>
+            {_family_html}
+        </div>
+        <hr class="fancy-divider">
+        """, unsafe_allow_html=True)
+        b1, b2 = st.columns(2)
+        with b1:
+            if st.button("✕ Close", key="close_profile"):
+                st.session_state.viewed_profile = None; st.rerun()
+        with b2:
+            if st.button("👤 Full Profile", key="open_full_profile", type="primary"):
+                st.session_state.dp_target_uid = vp["id"]
+                st.session_state.viewed_profile = None
+                st.session_state.active_tab = 0
+                st.rerun()
+
+    st.markdown('<div class="search-hero"><div class="search-hero-title">🔍 Dynasty Search</div></div>', unsafe_allow_html=True)
     q = st.text_input("Dynasty name, member name, or city", value=st.session_state.ds_query,
-        placeholder="e.g. Sharma · Reddy · Hyderabad…", key="ds_q_input", label_visibility="collapsed")
+        placeholder="Search your Dynasty", key="ds_q_input", label_visibility="collapsed")
     st.session_state.ds_query = q
-    st.markdown('</div>', unsafe_allow_html=True)
 
-    st.markdown('<div class="filter-strip">', unsafe_allow_html=True)
     st.markdown('<div style="font-size:.73rem;text-transform:uppercase;letter-spacing:1.2px;color:var(--mist);margin-bottom:.5rem;">🎛️ Filters</div>', unsafe_allow_html=True)
     fc1, fc2, fc3, fc4, fc5 = st.columns([1.5, 1.5, 1.5, 1, 1])
     with fc1:
@@ -2715,7 +2747,6 @@ def _dynasty_search_tab(uid):
             st.session_state.ds_query = ""; st.session_state.ds_gen = "All"
             st.session_state.ds_city = ""; st.session_state.ds_occ = ""; st.session_state.ds_gender = "All"
             st.rerun()
-    st.markdown('</div>', unsafe_allow_html=True)
 
     base_sql = "SELECT * FROM users WHERE id != %s"
     params = [uid]
@@ -2770,31 +2801,34 @@ def _dynasty_search_tab(uid):
     if st.session_state.search_view == "grid":
         cols = st.columns(3)
         for idx, (r, dob_r, age_r) in enumerate(filtered):
-            r_init = "".join(p[0].upper() for p in r["full_name"].split()[:2])
+            r_init      = "".join(p[0].upper() for p in r["full_name"].split()[:2])
+            r_avatar    = avatar_html(r.get("profile_photo") or None, r_init, 54)
+            city_badge  = f'<span class="badge badge-green">{_esc(r["current_city"])}</span>' if r.get("current_city") else '<span class="badge badge-gold">—</span>'
             with cols[idx % 3]:
                 st.markdown(f"""
                 <div class="member-card">
-                    <div style="display:flex;justify-content:center;">{avatar_html(r.get("profile_photo") or None, r_init, 54)}</div>
-                    <div class="member-card-name">{r['full_name']}</div>
-                    <div class="member-card-dynasty">🏰 {r['dynasty_name']}</div>
+                    <div style="display:flex;justify-content:center;">{r_avatar}</div>
+                    <div class="member-card-name">{_esc(r['full_name'])}</div>
+                    <div class="member-card-dynasty">&#127968; {_esc(r['dynasty_name'])}</div>
                     <div style="display:flex;flex-wrap:wrap;justify-content:center;gap:.22rem;margin-top:.45rem;">
                         <span class="badge badge-gold">{_infer_generation(age_r)}</span>
-                        {f'<span class="badge badge-green">{r["current_city"]}</span>' if r.get("current_city") else ""}
+                        {city_badge}
                     </div>
                 </div>""", unsafe_allow_html=True)
                 if st.button("View Profile", key=f"vp_{r['id']}", use_container_width=True):
                     st.session_state.viewed_profile = dict(r); st.rerun()
     else:
         for r, dob_r, age_r in filtered:
-            r_init = "".join(p[0].upper() for p in r["full_name"].split()[:2])
+            r_init   = "".join(p[0].upper() for p in r["full_name"].split()[:2])
+            r_avatar = avatar_html(r.get("profile_photo") or None, r_init, 42)
+            city_str = f" · {_esc(r['current_city'])}" if r.get('current_city') else " · —"
             lc1, lc2 = st.columns([5, 1])
             with lc1:
                 st.markdown(f"""
                 <div class="member-list-row">
-                    {avatar_html(r.get("profile_photo") or None, r_init, 42)}
-                    <div><div class="member-list-name">{r['full_name']}</div>
-                    <div class="member-list-meta">🏰 {r['dynasty_name']} · Age {age_r}
-                    {f" · {r['current_city']}" if r.get('current_city') else ""} · {_infer_generation(age_r)}</div></div>
+                    {r_avatar}
+                    <div><div class="member-list-name">{_esc(r['full_name'])}</div>
+                    <div class="member-list-meta">&#127968; {_esc(r['dynasty_name'])} · Age {age_r}{city_str} · {_infer_generation(age_r)}</div></div>
                 </div>""", unsafe_allow_html=True)
             with lc2:
                 if st.button("View", key=f"vlp_{r['id']}", use_container_width=True):
@@ -2828,8 +2862,8 @@ def _family_album_tab(uid, dynasty):
 
     if st.session_state.get("_album_creating"):
         with st.expander("📁 Create New Album", expanded=True):
-            al_title = st.text_input("Album Title *", placeholder="e.g. Diwali 2024", key="al_title")
-            al_desc  = st.text_area("Description", placeholder="A few words about this album…", key="al_desc", max_chars=300)
+            al_title = st.text_input("Album Title *", placeholder="", key="al_title")
+            al_desc  = st.text_area("Description", placeholder="", key="al_desc", max_chars=300)
             al_priv  = st.selectbox("Visibility", ["dynasty", "private"], key="al_priv",
                 format_func=lambda x: "🏰 Dynasty (shared with family)" if x == "dynasty" else "🔒 Private (only me)")
             al_cover_file = st.file_uploader("Cover Photo (optional)", type=["jpg","jpeg","png","webp"], key="al_cover")
@@ -2860,26 +2894,28 @@ def _family_album_tab(uid, dynasty):
         st.markdown('<div class="msg-info">No albums yet. Create your first family album! 📷</div>', unsafe_allow_html=True)
         return
 
-    st.markdown('<div class="album-grid">', unsafe_allow_html=True)
     cols = st.columns(min(len(albums), 4))
     for idx, alb in enumerate(albums):
         with cols[idx % min(len(albums), 4)]:
-            if alb.get("cover_photo"):
-                st.markdown(f'<div class="album-card"><img src="{alb["cover_photo"]}" class="album-cover" />', unsafe_allow_html=True)
-            else:
-                st.markdown('<div class="album-card"><div class="album-cover-placeholder">📁</div>', unsafe_allow_html=True)
             priv_badge = "🏰" if alb["privacy"] == "dynasty" else "🔒"
+            cover_html = (
+                f'<img src="{alb["cover_photo"]}" class="album-cover" />'
+                if alb.get("cover_photo")
+                else '<div class="album-cover-placeholder">📁</div>'
+            )
             st.markdown(f"""
-            <div class="album-info">
-                <div class="album-title">{alb['title']}</div>
-                <div class="album-meta">{priv_badge} · {alb['media_count']} photos · by {alb['creator_name']}</div>
-            </div></div>""", unsafe_allow_html=True)
+            <div class="album-card">
+                {cover_html}
+                <div class="album-info">
+                    <div class="album-title">{_esc(alb['title'])}</div>
+                    <div class="album-meta">{priv_badge} · {alb['media_count']} photos · by {_esc(alb['creator_name'])}</div>
+                </div>
+            </div>""", unsafe_allow_html=True)
             if st.button("Open", key=f"open_al_{alb['id']}", use_container_width=True):
                 st.session_state.current_album_id = alb["id"]
                 st.session_state.album_view = "grid"
                 st.session_state.slideshow_idx = 0
                 st.rerun()
-    st.markdown('</div>', unsafe_allow_html=True)
 
 
 def _album_detail_view(uid, dynasty):
@@ -2921,11 +2957,11 @@ def _album_detail_view(uid, dynasty):
         with uf_col1:
             up_files = st.file_uploader("Choose photos", type=["jpg","jpeg","png","webp"],
                 accept_multiple_files=True, key=f"up_photos_{alb_id}")
-            up_caption  = st.text_input("Caption (all)", placeholder="e.g. Family gathering", key=f"up_cap_{alb_id}")
-            up_location = st.text_input("Location",      placeholder="e.g. Hyderabad", key=f"up_loc_{alb_id}")
+            up_caption  = st.text_input("Caption (all)", placeholder="", key=f"up_cap_{alb_id}")
+            up_location = st.text_input("Location",      placeholder="", key=f"up_loc_{alb_id}")
         with uf_col2:
-            up_tags    = st.text_input("Tags (comma separated)", placeholder="festival, reunion", key=f"up_tags_{alb_id}")
-            up_date    = st.date_input("Date Taken", value=date.today(), key=f"up_date_{alb_id}")
+            up_tags    = st.text_input("Tags (comma separated)", placeholder="", key=f"up_tags_{alb_id}")
+            up_date= st.date_input("Date Taken", value=date.today(), key=f"up_date_{alb_id}", format="DD/MM/YYYY")
 
         if st.button("Upload", type="primary", key=f"do_upload_{alb_id}"):
             if not up_files:
@@ -2952,7 +2988,6 @@ def _album_detail_view(uid, dynasty):
         return
 
     if st.session_state.album_view == "grid":
-        st.markdown('<div class="media-grid">', unsafe_allow_html=True)
         cols = st.columns(4)
         for idx, m in enumerate(media):
             with cols[idx % 4]:
@@ -2975,7 +3010,6 @@ def _album_detail_view(uid, dynasty):
                         if st.button("🗑️", key=f"del_media_{m['id']}", use_container_width=True):
                             q_exec("DELETE FROM album_media WHERE id=%s", (m["id"],))
                             set_msg("Photo removed.", "info"); st.rerun()
-        st.markdown('</div>', unsafe_allow_html=True)
 
     elif st.session_state.album_view == "slideshow":
         idx = st.session_state.slideshow_idx % len(media)
@@ -3003,7 +3037,6 @@ def _album_detail_view(uid, dynasty):
         for m in media:
             key = str(m.get("taken_on") or m["created_at"].date() if m.get("created_at") else "Unknown")
             by_date[key].append(m)
-        st.markdown('<div class="timeline-wrap">', unsafe_allow_html=True)
         for dt in sorted(by_date.keys(), reverse=True):
             st.markdown(f'<div class="tl-event"><div class="tl-dot"></div><div class="tl-card">', unsafe_allow_html=True)
             try: dt_fmt = date.fromisoformat(dt).strftime("%d %B %Y")
@@ -3015,7 +3048,6 @@ def _album_detail_view(uid, dynasty):
                     st.image(m["media_data"], use_container_width=True)
                     if m.get("caption"): st.caption(m["caption"])
             st.markdown('</div></div>', unsafe_allow_html=True)
-        st.markdown('</div>', unsafe_allow_html=True)
 
     if alb["user_id"] == uid:
         st.markdown('<hr class="fancy-divider">', unsafe_allow_html=True)
@@ -3041,10 +3073,10 @@ def _family_diary_tab(uid):
 
         st.markdown(f'<div style="font-family:\'Cormorant Garamond\',serif;font-size:1.45rem;font-weight:700;color:var(--bark);margin-bottom:.8rem;">{"✏️ Edit Entry" if mode=="edit" else "📝 New Diary Entry"}</div>', unsafe_allow_html=True)
 
-        d_title   = st.text_input("Title *", value=entry["title"] if entry else "", placeholder="What's this about?", key="d_title")
-        d_date    = st.date_input("Date", value=ensure_dob(entry["entry_date"]) if entry else date.today(), key="d_date")
+        d_title   = st.text_input("Title *", value=entry["title"] if entry else "", placeholder="", key="d_title")
+        d_date    = st.date_input("Date", value=ensure_dob(entry["entry_date"]) if entry else date.today(), key="d_date", format="DD/MM/YYYY")
         d_content = st.text_area("Write your entry…", value=entry["content"] if entry else "",
-            height=280, key="d_content", placeholder="Dear diary…\n\nToday our family gathered for…")
+            height=280, key="d_content", placeholder="")
 
         col1, col2, col3 = st.columns(3)
         with col1:
@@ -3054,7 +3086,7 @@ def _family_diary_tab(uid):
                 key="d_mood")
         with col2:
             d_tags = st.text_input("Tags", value=entry["tags"] if entry else "",
-                placeholder="reunion, festival…", key="d_tags")
+                placeholder="", key="d_tags")
         with col3:
             priv_opts = ["private", "dynasty"]
             d_priv = st.selectbox("Privacy", priv_opts,
@@ -3111,7 +3143,6 @@ def _family_diary_tab(uid):
                 if st.button("✏️ Edit", key="d_edit_btn", type="primary"):
                     st.session_state.diary_entry_id = entry["id"]
                     st.session_state.diary_mode = "edit"; st.rerun()
-        st.markdown('<div class="card">', unsafe_allow_html=True)
         mood_str = f'<span class="diary-mood">{entry["mood"]}</span>' if entry.get("mood") else ""
         st.markdown(f"""
         <div class="diary-date">{ensure_dob(entry['entry_date']).strftime('%A, %d %B %Y')}</div>
@@ -3123,7 +3154,6 @@ def _family_diary_tab(uid):
         st.markdown('<hr class="fancy-divider">', unsafe_allow_html=True)
         st.markdown(f'<div class="diary-full-content">{_esc(entry["content"])}</div>', unsafe_allow_html=True)
         st.markdown(f'<div style="font-size:.72rem;color:var(--mist);margin-top:1rem;">{"🔒 Private" if entry["privacy"]=="private" else "🏰 Dynasty"} · {"Draft" if entry["is_draft"] else "Published"}</div>', unsafe_allow_html=True)
-        st.markdown('</div>', unsafe_allow_html=True)
         return
 
     st.markdown('<div style="font-family:\'Cormorant Garamond\',serif;font-size:1.55rem;font-weight:700;color:var(--bark);margin-bottom:.8rem;">📖 Family Diary</div>', unsafe_allow_html=True)
@@ -3164,18 +3194,21 @@ def _family_diary_tab(uid):
         draft_badge = '<span class="badge badge-gold">Draft</span>' if e.get("is_draft") else ""
         priv_badge = "🔒" if e["privacy"] == "private" else "🏰"
 
+        tags_html = (
+            '<div style="margin-top:.35rem;">'
+            + "".join(f'<span class="badge badge-blue"># {t.strip()}</span>' for t in e["tags"].split(",") if t.strip())
+            + '</div>'
+        ) if e.get("tags") else ""
         st.markdown(f"""
         <div class="diary-entry">
             <div class="diary-date">{priv_badge} {ed.strftime('%d %B %Y')} {draft_badge}</div>
-            <div class="diary-title">{mood_str}{e['title']}</div>
-            <div class="diary-preview">{preview}</div>
-            {f'<div style="margin-top:.35rem;">' + "".join(f'<span class="badge badge-blue"># {t.strip()}</span>' for t in e["tags"].split(",") if t.strip()) + '</div>' if e.get("tags") else ""}
+            <div class="diary-title">{mood_str}{_esc(e['title'])}</div>
+            <div class="diary-preview">{_esc(preview)}</div>
+            {tags_html}
         </div>""", unsafe_allow_html=True)
-        ec1, ec2 = st.columns([4, 1])
-        with ec2:
-            if st.button("Read →", key=f"read_entry_{e['id']}", use_container_width=True):
-                st.session_state.diary_entry_id = e["id"]
-                st.session_state.diary_mode = "view"; st.rerun()
+        if st.button("→ Read", key=f"read_entry_{e['id']}", use_container_width=True):
+            st.session_state.diary_entry_id = e["id"]
+            st.session_state.diary_mode = "view"; st.rerun()
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 3.3  FAMILY TIMELINE
@@ -3207,12 +3240,12 @@ def _family_timeline_tab(uid, dynasty):
             et_col1, et_col2 = st.columns(2)
             with et_col1:
                 ev_type  = st.selectbox("Event Type *", EVENT_TYPES, key="ev_type")
-                ev_title = st.text_input("Title *", placeholder="e.g. Birth of Ravi Sharma", key="ev_title")
-                ev_date  = st.date_input("Event Date *", key="ev_date")
-                ev_loc   = st.text_input("Location", placeholder="e.g. Hyderabad", key="ev_loc")
+                ev_title = st.text_input("Title *", placeholder="", key="ev_title")
+                ev_date  = st.date_input("Event Date *", key="ev_date", format="DD/MM/YYYY")
+                ev_loc   = st.text_input("Location", placeholder="", key="ev_loc")
             with et_col2:
-                ev_desc  = st.text_area("Description", placeholder="Details about this event…", key="ev_desc", height=100)
-                ev_tags  = st.text_input("Tags", placeholder="milestone, family", key="ev_tags")
+                ev_desc  = st.text_area("Description", placeholder="", key="ev_desc", height=100)
+                ev_tags  = st.text_input("Tags", placeholder="", key="ev_tags")
                 ev_priv  = st.selectbox("Privacy", ["dynasty", "private"], key="ev_priv",
                     format_func=lambda x: "🏰 Dynasty" if x == "dynasty" else "🔒 Private")
                 ev_media_file = st.file_uploader("Attach Photo (optional)", type=["jpg","jpeg","png","webp"], key="ev_media")
@@ -3271,7 +3304,6 @@ def _family_timeline_tab(uid, dynasty):
         decade = (yr // 10) * 10
         by_decade[decade].append(ev)
 
-    st.markdown('<div class="timeline-wrap">', unsafe_allow_html=True)
     for decade in sorted(by_decade.keys(), reverse=True):
         st.markdown(f"""
         <div style="font-family:'Cormorant Garamond',serif;font-size:1.25rem;font-weight:700;
@@ -3307,17 +3339,15 @@ def _family_timeline_tab(uid, dynasty):
                 </div>
             </div>""", unsafe_allow_html=True)
 
-            if ev.get("media_data") or ev["user_id"] == uid:
-                ec1, ec2 = st.columns([4, 1])
-                with ec1:
-                    if ev.get("media_data"):
-                        st.image(ev["media_data"], width=300)
-                with ec2:
-                    if ev["user_id"] == uid:
-                        if st.button("🗑️", key=f"del_ev_{ev['id']}", help="Delete event"):
-                            q_exec("DELETE FROM family_timeline WHERE id=%s", (ev["id"],))
-                            set_msg("Event removed.", "info"); st.rerun()
-    st.markdown('</div>', unsafe_allow_html=True)
+            col_img, col_del = st.columns([4, 1])
+            with col_img:
+                if ev.get("media_data"):
+                    st.image(ev["media_data"], width=300)
+            with col_del:
+                if ev["user_id"] == uid:
+                    if st.button("🗑️", key=f"del_ev_{ev['id']}", help="Delete event"):
+                        q_exec("DELETE FROM family_timeline WHERE id=%s", (ev["id"],))
+                        set_msg("Event removed.", "info"); st.rerun()
 
 # ══════════════════════════════════════════════════════════════════════════════
 # FAMILY LINKS TAB — with bidirectional link support (PATCHED)
@@ -3326,7 +3356,6 @@ def _family_links_tab(uid):
     u = st.session_state.user
     links = get_links(uid)
 
-    st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown('<div class="card-title">👨‍👩‍👧‍👦 Family Links</div>', unsafe_allow_html=True)
 
     if links:
@@ -3436,13 +3465,14 @@ def _family_links_tab(uid):
                     res_init = "".join(p[0].upper() for p in res["full_name"].split()[:2])
                     rc1, rc2 = st.columns([3, 1])
                     with rc1:
+                        _res_av = avatar_html(res.get("profile_photo") or None, res_init, 34)
                         st.markdown(
                             f'<div class="search-result" style="display:flex;align-items:center;gap:.6rem;">'
-                            f'{avatar_html(res.get("profile_photo") or None, res_init, 34)}'
-                            f'<div><strong>{res["full_name"]}</strong> · '
-                            f'<span style="color:var(--mist);">{res["dynasty_name"]}</span> · '
+                            f'{_res_av}'
+                            f'<div><strong>{_esc(res["full_name"])}</strong> · '
+                            f'<span style="color:var(--mist);">{_esc(res["dynasty_name"])}</span> · '
                             f'Age {calc_age(dob_r)}'
-                            f'{(" · " + res["current_city"]) if res.get("current_city") else ""}'
+                            f'{(" · " + _esc(res["current_city"])) if res.get("current_city") else " · —"}'
                             f'</div></div>',
                             unsafe_allow_html=True
                         )
@@ -3473,7 +3503,6 @@ def _family_links_tab(uid):
                 set_msg(f"Added {mn} as {mr}.", "success")
             st.rerun()
 
-    st.markdown('</div>', unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SETTINGS TAB
@@ -3481,15 +3510,12 @@ def _family_links_tab(uid):
 def _settings_tab(uid):
     u = st.session_state.user
     initials = "".join(p[0].upper() for p in u["full_name"].split()[:2])
-    st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown('<div class="card-title">⚙️ Edit Profile</div>', unsafe_allow_html=True)
 
     st.markdown("**📷 Profile Photo**")
     current_photo = u.get("profile_photo") or None
-    st.markdown('<div class="photo-upload-zone">', unsafe_allow_html=True)
     new_photo_file = st.file_uploader("Upload new photo (JPG/PNG, max 800 KB)",
         type=["jpg","jpeg","png","webp"], key="settings_photo", label_visibility="collapsed")
-    st.markdown('</div>', unsafe_allow_html=True)
 
     preview_photo = current_photo
     if new_photo_file:
@@ -3499,8 +3525,10 @@ def _settings_tab(uid):
 
     col_prev, col_btn = st.columns([1, 2])
     with col_prev:
-        st.markdown(f'<div class="photo-preview-wrap">{avatar_html(preview_photo, initials, 76)}'
-            f'<span style="font-size:.75rem;color:var(--mist);">{"New preview" if new_photo_file else "Current photo"}</span>'
+        _prev_av    = avatar_html(preview_photo, initials, 76)
+        _prev_label = "New preview" if new_photo_file else "Current photo"
+        st.markdown(f'<div class="photo-preview-wrap">{_prev_av}'
+            f'<span style="font-size:.75rem;color:var(--mist);">{_prev_label}</span>'
             f'</div>', unsafe_allow_html=True)
     with col_btn:
         st.write(""); st.write("")
@@ -3512,12 +3540,14 @@ def _settings_tab(uid):
                     if err: set_msg(err, "error")
                     else:
                         q_exec("UPDATE users SET profile_photo=%s WHERE id=%s", (pd, uid))
+                        get_user.clear()
                         st.session_state.user = dict(get_user(uid))
                         set_msg("Profile photo updated! 📸", "success")
                 st.rerun()
         with sc2:
             if st.button("🗑️ Remove", use_container_width=True, disabled=not current_photo):
                 q_exec("UPDATE users SET profile_photo='' WHERE id=%s", (uid,))
+                get_user.clear()
                 st.session_state.user = dict(get_user(uid))
                 set_msg("Photo removed.", "info"); st.rerun()
 
@@ -3525,6 +3555,9 @@ def _settings_tab(uid):
     with st.form("edit_form"):
         fn  = st.text_input("Full Name",    value=u["full_name"])
         occ = st.text_input("Occupation",   value=u.get("occupation", ""))
+        rel = st.text_input("Religion",     value=u.get("religion", ""))
+        cst = st.text_input("Caste",        value=u.get("caste", ""))
+        got = st.text_input("Gotram",       value=u.get("gotram", ""))
         bc  = st.text_input("Birth City",   value=u.get("birth_city", ""))
         cc  = st.text_input("Current City", value=u.get("current_city", ""))
         opts = ["Prefer not to say", "Male", "Female", "Other"]
@@ -3535,8 +3568,11 @@ def _settings_tab(uid):
                 set_msg("Full Name and Dynasty Name required.", "error")
             else:
                 q_exec("""UPDATE users SET full_name=%s,occupation=%s,birth_city=%s,
-                           current_city=%s,gender=%s,dynasty_name=%s WHERE id=%s""",
-                       (fn.strip(), occ.strip(), bc.strip(), cc.strip(), gen, dyn.strip(), uid))
+                           current_city=%s,gender=%s,dynasty_name=%s,
+                           religion=%s,caste=%s,gotram=%s WHERE id=%s""",
+                       (fn.strip(), occ.strip(), bc.strip(), cc.strip(), gen, dyn.strip(),
+                        rel.strip(), cst.strip(), got.strip(), uid))
+                get_user.clear()
                 st.session_state.user = dict(get_user(uid))
                 set_msg("Profile updated! ✨", "success")
             st.rerun()
@@ -3546,13 +3582,14 @@ def _settings_tab(uid):
     with st.form("pass_form"):
         op  = st.text_input("Current Password", type="password")
         np1 = st.text_input("New Password",     type="password")
-        np2 = st.text_input("Confirm New Pwd",  type="password")
+        np2 = st.text_input("Confirm New Password",  type="password")
         if st.form_submit_button("🔐 Update Password"):
             if not check_pw(op, u["password"]): set_msg("Current password wrong.", "error")
             elif len(np1) < 8: set_msg("New password ≥ 8 chars.", "error")
             elif np1 != np2:   set_msg("Passwords don't match.", "error")
             else:
                 q_exec("UPDATE users SET password=%s WHERE id=%s", (hash_pw(np1), uid))
+                get_user.clear()
                 st.session_state.user = dict(get_user(uid))
                 set_msg("Password changed! 🔒", "success")
             st.rerun()
@@ -3560,7 +3597,6 @@ def _settings_tab(uid):
     st.markdown('<hr class="fancy-divider">', unsafe_allow_html=True)
     if st.button("🚪 Logout", use_container_width=True):
         st.session_state.user = None; goto("landing"); st.rerun()
-    st.markdown('</div>', unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # DASHBOARD
@@ -3616,7 +3652,6 @@ def page_dashboard():
         _family_timeline_tab(u["id"], dynasty)
     with tabs[7]:
         feed = get_activity_feed(u["id"], dynasty)
-        st.markdown('<div class="feed-card">', unsafe_allow_html=True)
         st.markdown('<div class="feed-title">📜 Recent Activity</div>', unsafe_allow_html=True)
         if feed:
             for item in feed:
@@ -3630,7 +3665,6 @@ def page_dashboard():
                 </div>""", unsafe_allow_html=True)
         else:
             st.markdown('<div class="feed-empty">No recent activity yet. Start by adding family members! 🌱</div>', unsafe_allow_html=True)
-        st.markdown('</div>', unsafe_allow_html=True)
     with tabs[8]:
         _settings_tab(u["id"])
 
