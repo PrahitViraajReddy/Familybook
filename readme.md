@@ -2,7 +2,7 @@
 
 A full-featured family tree and dynasty management web app built with **Streamlit** and **PostgreSQL**. Create your family profile, link relatives, share memories through albums, write diary entries, and visualize your lineage — all in one place.
 
-🔗 **Live App:** [familybook-wrzd.onrender.com](https://familybook-wrzd.onrender.com)
+🔗 **Live App:** [familybook-7ff4.onrender.com](https://familybook-7ff4.onrender.com)
 
 ---
 
@@ -92,4 +92,4 @@ The app auto-initializes the following tables:
 ## 🔒 Security
 
 - Passwords hashed using **bcrypt**
-🔗 **Live App:** https://familybook-wrzd.onrender.com/
+🔗 **Live App:** https://familybook-7ff4.onrender.com/
