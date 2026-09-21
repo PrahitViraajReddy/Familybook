@@ -78,7 +78,7 @@ The application stores user and family data in PostgreSQL and uses Streamlit for
 
 The project follows a Streamlit + PostgreSQL application architecture:
 
-**Streamlit UI → Application Logic → PostgreSQL Connection Pool → PostgreSQL Database**
+**Streamlit UI → Application Logic → psycopg2 → PostgreSQL (Supabase)**
 
 The application uses a threaded PostgreSQL connection pool with connection liveness checks and TCP keepalive settings to handle long-running Streamlit sessions more reliably.
 
@@ -119,7 +119,7 @@ Relationships use PostgreSQL foreign keys with cascading or nullifying delete be
 | Image Processing | Pillow |
 | Data Handling | Python standard library + PostgreSQL queries |
 | Deployment | Render |
-| Database Hosting | PostgreSQL-compatible hosted database / Supabase connection pooler |
+| Database Hosting | **Supabase (PostgreSQL)** |
 
 ---
 
