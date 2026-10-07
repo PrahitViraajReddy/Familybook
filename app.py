@@ -92,12 +92,14 @@ def _get_conn():
             with conn.cursor() as _cur:
                 _cur.execute("SELECT 1")
         except Exception:
-            # Connection is dead — replace it with a fresh one
-            try:
-                pool.putconn(conn, close=True)
-            except Exception:
-                pass
-            conn = _new_connection()
+            # Connection is dead — discard it and borrow a replacement
+            # from the same pool. A standalone connection must NOT be passed
+            # to pool.putconn(), because ThreadedConnectionPool only tracks
+            # connections it created itself.
+            pool.putconn(conn, close=True)
+            conn = pool.getconn()
+            with conn.cursor() as _cur:
+                _cur.execute("SELECT 1")
         yield conn
     except Exception:
         # Return broken connection so the pool can discard it
@@ -380,7 +382,6 @@ def get_user_email(email):
     )
 
 
-@st.cache_data(ttl=30, show_spinner=False)
 def get_links(uid):
     return q_all("""
         SELECT fl.*, 
