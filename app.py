@@ -2646,6 +2646,78 @@ function drawEdges(){{
     }}
   }}
 
+  // ── 3c. Parent-side relatives ──────────────────────────────────────────
+  // Connect blood-side relatives to the correct parent. If a side relative
+  // is a spouse (e.g. Paternal Aunt's Husband), connect it to the blood-side
+  // partner when that node exists; otherwise fall back to the correct parent.
+  const SIDE_TO_PARENT = {{
+    'Paternal Uncle': new Set(['Father','Stepfather']),
+    'Elder Paternal Uncle': new Set(['Father','Stepfather']),
+    'Paternal Aunt': new Set(['Father','Stepfather']),
+    'Maternal Uncle': new Set(['Mother','Stepmother']),
+    'Maternal Aunt': new Set(['Mother','Stepmother'])
+  }};
+  const SIDE_SPOUSE_TO_PARENT = {{
+    "Paternal Aunt's Husband": new Set(['Father','Stepfather']),
+    "Paternal Uncle's Wife": new Set(['Father','Stepfather']),
+    "Maternal Uncle's Wife": new Set(['Mother','Stepmother']),
+    "Maternal Aunt's Husband": new Set(['Mother','Stepmother'])
+  }};
+  const SIDE_SPOUSE_TO_BLOOD = {{
+    "Paternal Aunt's Husband": new Set(['Paternal Aunt']),
+    "Paternal Uncle's Wife": new Set(['Paternal Uncle','Elder Paternal Uncle']),
+    "Maternal Uncle's Wife": new Set(['Maternal Uncle']),
+    "Maternal Aunt's Husband": new Set(['Maternal Aunt'])
+  }};
+
+  const sideNodes = Object.values(NODES).filter(
+    n => n.gen===-1 && (SIDE_TO_PARENT[n.relation] || SIDE_SPOUSE_TO_PARENT[n.relation])
+  );
+
+  for(const side of sideNodes){{
+    let target = null;
+
+    if(SIDE_SPOUSE_TO_BLOOD[side.relation]){{
+      const bloodRels = SIDE_SPOUSE_TO_BLOOD[side.relation];
+      target = Object.values(NODES).find(
+        n => n.gen===-1 && bloodRels.has(n.relation) && n.id !== side.id
+      ) || null;
+
+      // If the blood-side partner is absent from the visible graph, use the
+      // correct Father/Mother branch rather than leaving the card floating.
+      if(!target){{
+        const parentRels = SIDE_SPOUSE_TO_PARENT[side.relation];
+        target = Object.values(NODES).find(
+          n => n.gen===-1 && parentRels.has(n.relation)
+        ) || null;
+      }}
+    }} else {{
+      const parentRels = SIDE_TO_PARENT[side.relation];
+      target = Object.values(NODES).find(
+        n => n.gen===-1 && parentRels.has(n.relation)
+      ) || null;
+    }}
+
+    if(!target) continue;
+
+    const x1 = side.x;
+    const y1 = side.y + NH/2;
+    const x2 = target.x;
+    const y2 = target.y + NH/2;
+    const branchY = Math.max(y1,y2) + 22;
+
+    const path = svgEl('path');
+    path.setAttribute(
+      'd',
+      `M${{x1}},${{y1}} V${{branchY}} H${{x2}} V${{y2}}`
+    );
+    path.setAttribute('stroke', parentCol+'99');
+    path.setAttribute('stroke-width','1.8');
+    path.setAttribute('fill','none');
+    path.setAttribute('stroke-linejoin','round');
+    svg.appendChild(path);
+  }}
+
   // ── 4 & 5. Ancestors gen ≤ -2 ─────────────────────────────────────────────
   //
   // Coupled pairs: stem drops from couple midpoint to their SPECIFIC blood child
