@@ -2225,44 +2225,6 @@ def _family_tree_tab(uid):
     zoom_val   = zoom / 100.0
     spjs = "true" if show_photos else "false"
 
-    # Parent-side connectors are generated server-side from the already-resolved
-    # graph coordinates. This deliberately avoids injecting new JavaScript into
-    # the Python f-string.
-    side_parent_map = {
-        "Paternal Uncle": {"Father", "Stepfather"},
-        "Elder Paternal Uncle": {"Father", "Stepfather"},
-        "Paternal Aunt": {"Father", "Stepfather"},
-        "Maternal Uncle": {"Mother", "Stepmother"},
-        "Maternal Aunt": {"Mother", "Stepmother"},
-    }
-    side_edges = []
-    node_h = 90  # Must match NODE_H used by _build_tree_data()
-    for nid, n in nodes.items():
-        rel = n.get("relation")
-        if rel not in side_parent_map:
-            continue
-        target = next(
-            (
-                p for p in nodes.values()
-                if p.get("gen") == -1
-                and p.get("relation") in side_parent_map[rel]
-            ),
-            None,
-        )
-        if not target:
-            continue
-        spouse = nodes.get(n.get("spouseId")) if n.get("spouseId") else None
-        family_x = (n["x"] + spouse["x"]) / 2 if spouse else n["x"]
-        branch_y = n["y"] + node_h / 2 + 24
-        side_edges.append(
-            f'<path d="M {family_x:.1f} {n["y"] + node_h / 2:.1f} '
-            f'V {branch_y:.1f} H {target["x"]:.1f} '
-            f'V {target["y"] + node_h / 2:.1f}" '
-            f'stroke="#2563EB99" stroke-width="1.8" fill="none" '
-            f'stroke-linejoin="round"/>'
-        )
-    side_edges_html = "".join(side_edges)
-
     tree_html = f"""<!DOCTYPE html><html><head><meta charset="utf-8">
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@600;700&family=DM+Sans:wght@400;500&display=swap');
@@ -2314,7 +2276,7 @@ svg#edges{{position:absolute;top:0;left:0;overflow:visible;pointer-events:none;}
 </style></head><body>
 <div id="viewport">
   <div id="world">
-    <svg id="edges">{side_edges_html}</svg>
+    <svg id="edges"></svg>
     <div id="nodes-layer"></div>
     <div id="gen-labels"></div>
   </div>
@@ -2647,78 +2609,6 @@ function drawEdges(){{
     }}
   }}
 
-  // ── 3c. Parent-side relatives ──────────────────────────────────────────
-  // Connect blood-side relatives to the correct parent. If a side relative
-  // is a spouse (e.g. Paternal Aunt's Husband), connect it to the blood-side
-  // partner when that node exists; otherwise fall back to the correct parent.
-  const SIDE_TO_PARENT = {{
-    'Paternal Uncle': new Set(['Father','Stepfather']),
-    'Elder Paternal Uncle': new Set(['Father','Stepfather']),
-    'Paternal Aunt': new Set(['Father','Stepfather']),
-    'Maternal Uncle': new Set(['Mother','Stepmother']),
-    'Maternal Aunt': new Set(['Mother','Stepmother'])
-  }};
-  const SIDE_SPOUSE_TO_PARENT = {{
-    "Paternal Aunt's Husband": new Set(['Father','Stepfather']),
-    "Paternal Uncle's Wife": new Set(['Father','Stepfather']),
-    "Maternal Uncle's Wife": new Set(['Mother','Stepmother']),
-    "Maternal Aunt's Husband": new Set(['Mother','Stepmother'])
-  }};
-  const SIDE_SPOUSE_TO_BLOOD = {{
-    "Paternal Aunt's Husband": new Set(['Paternal Aunt']),
-    "Paternal Uncle's Wife": new Set(['Paternal Uncle','Elder Paternal Uncle']),
-    "Maternal Uncle's Wife": new Set(['Maternal Uncle']),
-    "Maternal Aunt's Husband": new Set(['Maternal Aunt'])
-  }};
-
-  const sideNodes = Object.values(NODES).filter(
-    n => n.gen===-1 && (SIDE_TO_PARENT[n.relation] || SIDE_SPOUSE_TO_PARENT[n.relation])
-  );
-
-  for(const side of sideNodes){{
-    let target = null;
-
-    if(SIDE_SPOUSE_TO_BLOOD[side.relation]){{
-      const bloodRels = SIDE_SPOUSE_TO_BLOOD[side.relation];
-      target = Object.values(NODES).find(
-        n => n.gen===-1 && bloodRels.has(n.relation) && n.id !== side.id
-      ) || null;
-
-      // If the blood-side partner is absent from the visible graph, use the
-      // correct Father/Mother branch rather than leaving the card floating.
-      if(!target){{
-        const parentRels = SIDE_SPOUSE_TO_PARENT[side.relation];
-        target = Object.values(NODES).find(
-          n => n.gen===-1 && parentRels.has(n.relation)
-        ) || null;
-      }}
-    }} else {{
-      const parentRels = SIDE_TO_PARENT[side.relation];
-      target = Object.values(NODES).find(
-        n => n.gen===-1 && parentRels.has(n.relation)
-      ) || null;
-    }}
-
-    if(!target) continue;
-
-    const x1 = side.x;
-    const y1 = side.y + NH/2;
-    const x2 = target.x;
-    const y2 = target.y + NH/2;
-    const branchY = Math.max(y1,y2) + 22;
-
-    const path = svgEl('path');
-    path.setAttribute(
-      'd',
-      `M${{x1}},${{y1}} V${{branchY}} H${{x2}} V${{y2}}`
-    );
-    path.setAttribute('stroke', parentCol+'99');
-    path.setAttribute('stroke-width','1.8');
-    path.setAttribute('fill','none');
-    path.setAttribute('stroke-linejoin','round');
-    svg.appendChild(path);
-  }}
-
   // ── 4 & 5. Ancestors gen ≤ -2 ─────────────────────────────────────────────
   //
   // Coupled pairs: stem drops from couple midpoint to their SPECIFIC blood child
@@ -2748,6 +2638,30 @@ function drawEdges(){{
           Math.abs(a.x-unionX) <= Math.abs(b.x-unionX) ? a : b
         );
     elbow(unionX, unionY+NH/2, target.x, target.y-NH/2, gc(ac.gen)+'bb');
+
+    // The user's parent may have siblings on the same generation.
+    // They are children of the same grandparent couple, NOT children of
+    // Father/Mother. Connect those blood-side siblings to the same union.
+    const sideSiblingRels = {{
+      'Father': new Set(['Paternal Uncle','Elder Paternal Uncle','Paternal Aunt']),
+      'Stepfather': new Set(['Paternal Uncle','Elder Paternal Uncle','Paternal Aunt']),
+      'Mother': new Set(['Maternal Uncle','Maternal Aunt']),
+      'Stepmother': new Set(['Maternal Uncle','Maternal Aunt'])
+    }};
+    const childRel = target.relation;
+    const siblingRels = sideSiblingRels[childRel];
+    if(siblingRels){{
+      const sideSiblings = Object.values(NODES).filter(
+        n => n.gen===-1 && siblingRels.has(n.relation)
+      );
+      for(const sib of sideSiblings){{
+        elbow(
+          unionX, unionY+NH/2,
+          sib.x, sib.y-NH/2,
+          gc(ac.gen)+'88'
+        );
+      }}
+    }}
   }}
 
   // Process unpaired ancestor singles
