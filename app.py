@@ -1270,25 +1270,48 @@ def _step2():
           "current_city": current_city.strip(), "occupation": occupation.strip(),
           "religion": religion.strip(), "caste": caste.strip(), "gotram": gotram.strip()})
                 if db_ok():
+                    email = d["email"].lower().strip()
                     try:
                         row = q_exec_return("""
                             INSERT INTO users(full_name,email,password,dob,dynasty_name,
                                               gender,birth_city,current_city,occupation,
                                               religion,caste,gotram,
                                               profile_photo,verified)
-                            VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,TRUE) RETURNING *""",
-                            (d["full_name"], d["email"], hash_pw(d["password"]),
+                            VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,TRUE)
+                            RETURNING *""",
+                            (d["full_name"], email, hash_pw(d["password"]),
                              d["dob"], d["dynasty_name"], d.get("gender", ""),
                              d.get("birth_city", ""), d.get("current_city", ""),
                              d.get("occupation", ""), d.get("religion", ""),
                              d.get("caste", ""), d.get("gotram", ""),
                              d.get("profile_photo", "")))
-                        st.session_state.user     = dict(row)
+
+                        # q_exec_return commits before returning.  Clear the
+                        # cached email lookup so a just-created account is
+                        # immediately visible on the next rerun.
+                        get_user_email.clear()
+                        get_user.clear()
+
+                        if not row:
+                            raise RuntimeError("Registration INSERT returned no row")
+
+                        st.session_state.user = dict(row)
                         st.session_state.reg_data = {}
                         st.session_state.reg_step = 1
                         set_msg(f"Welcome, {d['full_name']}! 🌳", "success")
                         goto("dashboard")
+                    except psycopg2.errors.UniqueViolation:
+                        # The DB is authoritative; don't report a vague
+                        # registration failure for an already-used email.
+                        get_user_email.clear()
+                        if get_user_email(email):
+                            set_msg("This email is already registered. Please log in.", "error")
+                        else:
+                            set_msg("This email is already registered. Please try again.", "error")
                     except Exception as e:
+                        # Keep database details out of the UI, but preserve the
+                        # real exception in Render logs for diagnosis.
+                        print(f"Registration failed [{type(e).__name__}]: {e}", flush=True)
                         set_msg("Registration failed. Please try again.", "error")
                 else:
                     set_msg("DB not connected.", "error")
