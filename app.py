@@ -1538,244 +1538,407 @@ def _detailed_profile_tab(current_uid):
 # ══════════════════════════════════════════════════════════════════════════════
 def _build_tree_data(uid):
     """
-    Build a flat node dict for the family tree.
+    Build the family-tree graph from the stored bidirectional family_links.
 
-    Key design decisions
-    ────────────────────
-    1.  COUPLES are placed side-by-side. A "union node" (virtual, invisible) is
-        inserted at the midpoint between each couple. Children hang from the
-        union node, NOT from any individual person.
+    The old implementation guessed couples by taking the first spouse/sister/BIL
+    and paired people by relation-name buckets. That breaks as soon as a family
+    has multiple siblings, multiple spouses, or more than one in-law.
 
-    2.  LAYOUT (gen 0 row):
-            [Sister | BIL]  gap  [You | Spouse]
-        Sister always sits to the LEFT of BIL (bloodline on the outside).
-        You always sit to the LEFT of Spouse.
-        A large gap separates the two family units.
-
-    3.  PARENTAGE is stored as parentUnionKey on every descendant node:
-            • Your children   → "union_you"
-            • Nieces/Nephews  → "union_sib"
-        The JS uses parentUnionKey to look up the correct X coordinate to
-        drop the edge from, eliminating all coordinate-guessing.
-
-    4.  PARENTS (gen -1) connect down to BOTH You and all Siblings via a shared
-        horizontal bar at mid-height between gen -1 and gen 0.
+    This version treats family_links as graph edges:
+      * spouseId is derived from an actual spouse link between two members
+      * parent/child unions are derived from reciprocal parent/child links
+      * ancestor couples are paired only when the database contains the spouse edge
+      * relation labels remain the labels the user selected; the tree does not
+        invent a relationship just because two people happen to share a category
     """
     u = get_user(uid)
     if not u:
         return {}, None
+
     u = dict(u)
     dob = ensure_dob(u["dob"])
     age = calc_age(dob)
 
-    # ── Relation category sets ────────────────────────────────────────────────
-    SPOUSE_RELS  = {"Husband", "Wife", "Partner"}
-    SISTER_RELS  = {"Sister", "Stepsister"}
-    BROTHER_RELS = {"Brother", "Stepbrother"}
-    SIBLING_RELS = SISTER_RELS | BROTHER_RELS
-    BIL_RELS     = {"Brother-in-law", "Husband's Brother",
-                    "Wife's Sister's Husband",
-                    "Husband's Sister", "Brother's Wife", "Wife's Sister"}
+    SPOUSE_RELS = {"Husband", "Wife", "Partner"}
+    SIBLING_RELS = {"Brother", "Sister", "Stepbrother", "Stepsister"}
+    CHILD_RELS = {"Son", "Daughter", "Stepson", "Stepdaughter"}
+    PARENT_RELS = {"Father", "Mother", "Stepfather", "Stepmother"}
     NIECE_NEPHEW = {"Niece", "Nephew"}
-    CHILD_RELS   = {"Son", "Daughter", "Stepson", "Stepdaughter"}
-    PARENT_RELS  = {"Father", "Mother", "Stepfather", "Stepmother"}
+    SIB_PIL_RELS = {
+        "Sister's Father-in-law", "Sister's Mother-in-law",
+        "Brother's Father-in-law", "Brother's Mother-in-law",
+    }
+    DESCENDANT_RELS = CHILD_RELS | {"Grandson", "Granddaughter",
+                                     "Great-grandson", "Great-granddaughter"}
+    ANCESTOR_RELS = PARENT_RELS | {
+        "Paternal Grandfather", "Paternal Grandmother",
+        "Maternal Grandfather", "Maternal Grandmother",
+        "Great-grandfather", "Great-grandmother",
+        "Paternal Great-grandfather", "Paternal Great-grandmother",
+        "Maternal Great-grandfather", "Maternal Great-grandmother",
+    }
 
-    # ── Layout constants ──────────────────────────────────────────────────────
-    NODE_W     = 175
-    NODE_H     = 90
-    H_GAP      = 40   # gap between ordinary nodes in a row
-    COUPLE_GAP = 8    # tighter gap between the two people in a couple
-    FAMILY_GAP = 80   # extra separation between [sis+BIL] and [You+Spouse]
-    V_GAP      = 110  # vertical distance between generation rows
-    ROW_H      = NODE_H + V_GAP
+    NODE_W = 175
+    NODE_H = 90
+    H_GAP = 40
+    COUPLE_GAP = 8
+    FAMILY_GAP = 80
+    V_GAP = 110
+    ROW_H = NODE_H + V_GAP
 
-    # ── Build all nodes ───────────────────────────────────────────────────────
+    # Direct links are what should be visible from the current user's tree.
+    links = get_links(uid)
+
+    # Pull reciprocal links for every registered person visible in this tree.
+    # This is the critical fix: the relationship graph is reconstructed from
+    # actual member-to-member edges instead of guessing from relation names.
+    member_ids = {int(uid)}
+    for lk in links:
+        if lk.get("member_id"):
+            try:
+                member_ids.add(int(lk["member_id"]))
+            except Exception:
+                pass
+
+    network_links = []
+    if member_ids:
+        network_links = q_all(
+            """
+            SELECT fl.*,
+                   u.full_name AS linked_name,
+                   u.dynasty_name AS linked_dynasty,
+                   u.profile_photo AS linked_photo,
+                   u.dob AS linked_dob,
+                   u.gender AS linked_gender,
+                   u.current_city AS linked_city,
+                   u.occupation AS linked_occ
+            FROM family_links fl
+            LEFT JOIN users u ON u.id = fl.member_id
+            WHERE fl.user_id = ANY(%s)
+            """,
+            (list(member_ids),)
+        )
+
+    # edge[(owner_id, target_id)] = canonical relation
+    edge = {}
+    for lk in network_links:
+        owner = lk.get("user_id")
+        target = lk.get("member_id")
+        if owner is None or target is None:
+            continue
+        edge[(int(owner), int(target))] = normalize_relation(lk.get("relation", ""))
+
+    # Node id is stable for the current tree render.
     nodes = {}
     self_id = f"self_{uid}"
     nodes[self_id] = {
-        "id": self_id, "label": u["full_name"], "age": age, "gen": 0,
+        "id": self_id,
+        "label": u["full_name"],
+        "age": age,
+        "gen": 0,
         "photo": u.get("profile_photo", "") or "",
-        "dynasty": u["dynasty_name"], "occupation": u.get("occupation", ""),
-        "city": u.get("current_city", ""), "isSelf": True,
-        "relation": "You", "verified": True, "uid": uid,
-        "spouseId": None, "parentUnionKey": None,
-        "isSpouse": False, "isSibling": False, "isBIL": False,
-        "isNieceNephew": False, "isChild": False, "isParent": False,
+        "dynasty": u["dynasty_name"],
+        "occupation": u.get("occupation", "") or "",
+        "city": u.get("current_city", "") or "",
+        "isSelf": True,
+        "relation": "You",
+        "verified": True,
+        "uid": int(uid),
+        "spouseId": None,
+        "parentUnionKey": None,
+        "isSpouse": False,
+        "isSibling": False,
+        "isBIL": False,
+        "isNieceNephew": False,
+        "isChild": False,
+        "isParent": False,
     }
 
-    links = get_links(uid)
     for lk in links:
-        nid  = f"lk_{lk['id']}"
+        nid = f"lk_{lk['id']}"
         name = lk.get("linked_name") or lk["member_name"]
-        # ── Normalize the stored relation to a canonical name ─────────────────
-        rel  = normalize_relation(lk["relation"])
-        go   = RELATION_GEN.get(rel, 0)
+        rel = normalize_relation(lk.get("relation", ""))
+        go = RELATION_GEN.get(rel, 0)
+
         lk_age = None
         if lk.get("linked_dob"):
             try:
                 lk_age = calc_age(ensure_dob(lk["linked_dob"]))
             except Exception:
                 pass
+
         nodes[nid] = {
-            "id": nid, "label": name, "age": lk_age, "gen": go,
+            "id": nid,
+            "label": name,
+            "age": lk_age,
+            "gen": go,
             "photo": lk.get("linked_photo", "") or "",
             "dynasty": lk.get("linked_dynasty", "") or "",
             "occupation": lk.get("linked_occ", "") or "",
             "city": lk.get("linked_city", "") or "",
-            "isSelf": False, "relation": rel,
+            "isSelf": False,
+            "relation": rel,
             "verified": bool(lk.get("member_id")),
-            "uid": lk.get("member_id"),
-            "spouseId": None, "parentUnionKey": None,
-            "isSpouse":      rel in SPOUSE_RELS,
-            "isSibling":     rel in SIBLING_RELS,
-            "isBIL":         rel in BIL_RELS,
+            "uid": int(lk["member_id"]) if lk.get("member_id") else None,
+            "spouseId": None,
+            "parentUnionKey": None,
+            "isSpouse": rel in SPOUSE_RELS,
+            "isSibling": rel in SIBLING_RELS,
+            "isBIL": rel in {
+                "Brother-in-law", "Husband's Brother",
+                "Wife's Sister's Husband", "Husband's Sister",
+                "Brother's Wife", "Wife's Sister",
+            },
             "isNieceNephew": rel in NIECE_NEPHEW,
-            "isChild":       rel in CHILD_RELS,
-            "isParent":      rel in PARENT_RELS,
+            "isChild": rel in CHILD_RELS,
+            "isParent": rel in PARENT_RELS,
         }
 
-    # ── Identify key players ──────────────────────────────────────────────────
-    spouse_id  = next((nid for nid, n in nodes.items() if n.get("isSpouse")), None)
-    sister_ids = [nid for nid, n in nodes.items()
-                  if not n["isSelf"] and n["relation"] in SISTER_RELS]
-    bil_ids    = [nid for nid, n in nodes.items()
-                  if not n["isSelf"] and n["isBIL"] and
-                  n["relation"] in {"Brother-in-law", "Wife's Sister's Husband"}]
-    sibling_ids_all = [nid for nid, n in nodes.items()
-                       if not n["isSelf"] and n.get("isSibling")]
+    # Only registered members can have reciprocal graph evidence.
+    uid_to_nid = {
+        int(n["uid"]): nid
+        for nid, n in nodes.items()
+        if n.get("uid") is not None
+    }
 
-    SIS_PIL_RELS = {"Sister's Father-in-law", "Sister's Mother-in-law"}  # Sister's Parents-in-law
-    BRO_PIL_RELS = {"Brother's Father-in-law", "Brother's Mother-in-law"}
+    def relation_between(a_uid, b_uid):
+        if a_uid is None or b_uid is None:
+            return None
+        return edge.get((int(a_uid), int(b_uid)))
 
-    # Pair: first sister with first Sister's-Husband-style BIL
-    sister_id  = sister_ids[0] if sister_ids else None
-    bil_id     = bil_ids[0]    if bil_ids    else None
+    def is_spouse_edge(a_uid, b_uid):
+        return relation_between(a_uid, b_uid) in SPOUSE_RELS
 
-    if spouse_id:
-        nodes[spouse_id]["spouseId"]  = self_id
-        nodes[self_id]["spouseId"]    = spouse_id
-    if sister_id and bil_id:
-        nodes[sister_id]["spouseId"]  = bil_id
-        nodes[bil_id]["spouseId"]     = sister_id
+    def is_parent_edge(parent_uid, child_uid):
+        # Accept either stored direction because old data may have only one
+        # reciprocal row. Do not infer from gender alone.
+        a = relation_between(child_uid, parent_uid)
+        b = relation_between(parent_uid, child_uid)
+        return a in PARENT_RELS or b in CHILD_RELS
 
-    # ── Build gen buckets early (needed for couple detection) ─────────────────
-    by_gen: dict = {}
+    def pair_actual_spouses(candidate_nids):
+        """Return real spouse pairs; never pair two people merely by category."""
+        allowed = set(candidate_nids)
+        pairs = []
+        used = set()
+        for nid in candidate_nids:
+            if nid in used:
+                continue
+            n = nodes[nid]
+            target = None
+            for other in candidate_nids:
+                if other == nid or other in used:
+                    continue
+                o = nodes[other]
+                if n.get("uid") and o.get("uid") and (
+                    is_spouse_edge(n["uid"], o["uid"]) or
+                    is_spouse_edge(o["uid"], n["uid"])
+                ):
+                    target = other
+                    break
+            if target:
+                pairs.append((nid, target))
+                used.update((nid, target))
+        return pairs
+
+    # ── Actual spouse graph ──────────────────────────────────────────────────
+    all_nids = list(nodes.keys())
+    spouse_pairs = pair_actual_spouses(all_nids)
+
+    for a, b in spouse_pairs:
+        nodes[a]["spouseId"] = b
+        nodes[b]["spouseId"] = a
+
+    # Safe fallback only for the current user's explicitly selected spouse.
+    # This handles an old one-way/manual row without inventing sibling couples.
+    direct_spouse_nids = [
+        nid for nid, n in nodes.items()
+        if not n["isSelf"] and n["relation"] in SPOUSE_RELS
+    ]
+    if not nodes[self_id].get("spouseId") and len(direct_spouse_nids) == 1:
+        sp = direct_spouse_nids[0]
+        nodes[self_id]["spouseId"] = sp
+        nodes[sp]["spouseId"] = self_id
+
+    sibling_ids_all = [
+        nid for nid, n in nodes.items()
+        if not n["isSelf"] and n["relation"] in SIBLING_RELS
+    ]
+
+    # ── Generation buckets ───────────────────────────────────────────────────
+    by_gen = {}
     for nid, n in nodes.items():
         by_gen.setdefault(n["gen"], []).append(nid)
 
-    # ── Detect ancestor couples (Father+Mother, Grandfather+Grandmother, etc.) ─
-    # Each entry: {"nid_a": male_nid, "nid_b": female_nid, "gen": level,
-    #              "child_nid": the specific node in gen+1 who is their blood child}
-    #
-    # PARENT COUPLE (gen -1): their blood children are You + all siblings.
-    #   The "child_nid" is the self node (used as the T-bar anchor).
-    #
-    # GRANDPARENT COUPLE (gen -2): their blood child is the PARENT who belongs
-    #   to their bloodline. e.g. Maternal Grandfather/Grandmother → Mother.
-    #   Paternal Grandfather/Grandmother → Father.
-    #
-    # GREAT-GRANDPARENT COUPLE (gen -3): their blood child is their grandchild
-    #   in gen -2.
-    #
-    # To resolve this we define which gen+1 relation(s) are the blood child
-    # of each couple type.
-    ANCESTOR_COUPLE_DEFS = {
-        -1: [
-            ({"Father", "Stepfather"}, {"Mother", "Stepmother"},
-             None),   # child = self + siblings (handled specially in JS)
-            ({"Father-in-law"},        {"Mother-in-law"},
-             None),
-        ],
-        -2: [
-            ({"Paternal Grandfather"}, {"Paternal Grandmother"},
-             {"Father", "Stepfather"}),          # their blood child is the Father
-            ({"Maternal Grandfather"}, {"Maternal Grandmother"},
-             {"Mother", "Stepmother"}),           # their blood child is the Mother
-        ],
-        -3: [
-            ({"Great-grandfather"},    {"Great-grandmother"},
-             {"Paternal Grandfather", "Maternal Grandfather",
-              "Paternal Grandmother", "Maternal Grandmother"}),
-        ],
-    }
+    # ── Determine each descendant's actual parent union ─────────────────────
+    for nid, n in nodes.items():
+        if n["isSelf"] or not n.get("uid"):
+            continue
 
-    ancestor_couples = []       # [{"nid_a":…, "nid_b":…, "gen":…, "child_nid":…}, …]
-    ancestor_coupled = set()    # nids already paired
+        parent_nids = []
+        for pid, p in nodes.items():
+            if pid == nid or not p.get("uid"):
+                continue
+            if is_parent_edge(p["uid"], n["uid"]):
+                parent_nids.append(pid)
 
-    for gen_level, pair_defs in ANCESTOR_COUPLE_DEFS.items():
-        gen_nids = by_gen.get(gen_level, [])
-        child_gen_nids = by_gen.get(gen_level + 1, [])
-        for pair_def in pair_defs:
-            male_rels, female_rels, child_rels = pair_def
-            male_nids   = [nid for nid in gen_nids
-                           if nodes[nid]["relation"] in male_rels
-                           and nid not in ancestor_coupled]
-            female_nids = [nid for nid in gen_nids
-                           if nodes[nid]["relation"] in female_rels
-                           and nid not in ancestor_coupled]
-            if male_nids and female_nids:
-                nid_a, nid_b = male_nids[0], female_nids[0]
-                nodes[nid_a]["spouseId"] = nid_b
-                nodes[nid_b]["spouseId"] = nid_a
-                # Find the specific blood child in the next generation
-                child_nid = None
-                if child_rels:
-                    child_nid = next(
-                        (nid for nid in child_gen_nids
-                         if nodes[nid]["relation"] in child_rels),
-                        None
+        # Prefer an actual parent in the current user's generation.
+        gen0_parents = [p for p in parent_nids if nodes[p]["gen"] == 0]
+        if gen0_parents:
+            if any(p == self_id or p == nodes[self_id].get("spouseId")
+                   for p in gen0_parents):
+                n["parentUnionKey"] = "union_you"
+            elif any(p in sibling_ids_all for p in gen0_parents):
+                n["parentUnionKey"] = "union_sib"
+
+        # If reciprocal parent data is incomplete, the direct relation still
+        # gives a safe fallback for the common Indian-family-tree cases.
+        if n.get("parentUnionKey") is None:
+            if n["relation"] in CHILD_RELS:
+                n["parentUnionKey"] = "union_you"
+            elif n["relation"] in NIECE_NEPHEW:
+                n["parentUnionKey"] = "union_sib"
+
+    # ── Ancestor couples from actual spouse + parent/child edges ────────────
+    ancestor_couples = []
+    ancestor_coupled = set()
+
+    for gen_level in sorted([g for g in by_gen if g < 0], reverse=True):
+        gen_nids = by_gen[gen_level]
+        pairs = pair_actual_spouses(gen_nids)
+
+        for a, b in pairs:
+            # For gen -1, the JS parent section expects the couple as a parent
+            # couple. For lower generations we also store their specific child.
+            child_nid = None
+            if gen_level < -1:
+                child_candidates = by_gen.get(gen_level + 1, [])
+                for child in child_candidates:
+                    cu = nodes[child].get("uid")
+                    if not cu:
+                        continue
+                    if is_parent_edge(nodes[a].get("uid"), cu) or is_parent_edge(nodes[b].get("uid"), cu):
+                        child_nid = child
+                        break
+
+            ancestor_couples.append({
+                "nid_a": a,
+                "nid_b": b,
+                "gen": gen_level,
+                "child_nid": child_nid,
+                "isSibPil": False,
+            })
+            ancestor_coupled.update((a, b))
+
+    # ── Sister/BIL and Brother/SIL couples are also resolved from graph data ─
+    # There is deliberately NO "first sister + first BIL" pairing anymore.
+    sibling_couples = []
+    for sibling in sibling_ids_all:
+        sp = nodes[sibling].get("spouseId")
+        if sp and sp in nodes:
+            sibling_couples.append([sibling, sp])
+
+    # ── Parents of a sibling's spouse (Sister's PIL / Brother's PIL) ────────
+    # Their child is identified by the actual parent edge, not by whichever BIL
+    # happens to be first in the list.
+    gen0_nids = by_gen.get(0, [])
+    for gen_nid in by_gen.get(-1, []):
+        rel = nodes[gen_nid]["relation"]
+        if rel not in SIB_PIL_RELS or gen_nid in ancestor_coupled:
+            continue
+
+        child_nid = None
+        for candidate in gen0_nids:
+            if candidate in sibling_ids_all and nodes[candidate].get("spouseId"):
+                spouse_nid = nodes[candidate]["spouseId"]
+                if spouse_nid and nodes[spouse_nid].get("uid") and nodes[gen_nid].get("uid"):
+                    if is_parent_edge(nodes[gen_nid]["uid"], nodes[spouse_nid]["uid"]):
+                        child_nid = spouse_nid
+                        break
+
+        if child_nid:
+            # Pair the two PIL records only if they are actually spouses.
+            mate = next(
+                (
+                    other for other in by_gen.get(-1, [])
+                    if other != gen_nid
+                    and nodes[other]["relation"] in SIB_PIL_RELS
+                    and nodes[other].get("uid")
+                    and nodes[gen_nid].get("uid")
+                    and (
+                        is_spouse_edge(nodes[gen_nid]["uid"], nodes[other].get("uid"))
+                        or is_spouse_edge(nodes[other].get("uid"), nodes[gen_nid]["uid"])
                     )
+                ),
+                None,
+            )
+            if mate and mate not in ancestor_coupled:
+                nodes[gen_nid]["spouseId"] = mate
+                nodes[mate]["spouseId"] = gen_nid
+                ancestor_coupled.update((gen_nid, mate))
                 ancestor_couples.append({
-                    "nid_a": nid_a, "nid_b": nid_b,
-                    "gen": gen_level,
-                    "child_nid": child_nid  # None for gen -1 (handled in JS)
+                    "nid_a": gen_nid,
+                    "nid_b": mate,
+                    "gen": -1,
+                    "child_nid": child_nid,
+                    "isSibPil": True,
                 })
-                ancestor_coupled.update([nid_a, nid_b])
 
-    # ── Assign parentUnionKey ─────────────────────────────────────────────────
-    for nid, n in nodes.items():
-        if n.get("isChild"):
-            n["parentUnionKey"] = "union_you"
-    for nid, n in nodes.items():
-        if n.get("isNieceNephew"):
-            n["parentUnionKey"] = "union_sib" if (sister_id and bil_id) else "union_you"
+    # ── Layout helpers ───────────────────────────────────────────────────────
+    def unit_width(unit):
+        return len(unit) * NODE_W + max(0, len(unit) - 1) * COUPLE_GAP
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # COORDINATE LAYOUT
-    # ══════════════════════════════════════════════════════════════════════════
-    y0 = 0  # gen 0 y-coordinate
+    def make_gen0_units():
+        used = set()
+        units = []
 
-    def unit_width(unit_list):
-        return len(unit_list) * NODE_W + max(0, len(unit_list) - 1) * COUPLE_GAP
-
-    # ── PASS 1: Gen 0 ────────────────────────────────────────────────────────
-    gen0_placed = set()
-    gen0_units  = []
-
-    unit_a = []
-    if sister_id and sister_id in by_gen.get(0, []):
-        if bil_id and bil_id in by_gen.get(0, []):
-            unit_a = [bil_id, sister_id]
-            gen0_placed.update([sister_id, bil_id])
+        # Keep the user's own couple in the visual centre.
+        if nodes[self_id].get("spouseId"):
+            sp = nodes[self_id]["spouseId"]
+            units.append([self_id, sp])
+            used.update((self_id, sp))
         else:
-            unit_a = [sister_id]
-            gen0_placed.add(sister_id)
-    if unit_a:
-        gen0_units.append(unit_a)
+            units.append([self_id])
+            used.add(self_id)
 
-    unit_b = [self_id]
-    gen0_placed.add(self_id)
-    if spouse_id and spouse_id in by_gen.get(0, []):
-        unit_b.append(spouse_id)
-        gen0_placed.add(spouse_id)
-    gen0_units.append(unit_b)
+        # Each real sibling couple is its own unit. No sibling is paired with
+        # somebody else merely because both are classified as in-laws.
+        for sib in sibling_ids_all:
+            if sib in used:
+                continue
+            sp = nodes[sib].get("spouseId")
+            if sp and sp in nodes and sp not in used:
+                units.insert(0, [sib, sp])
+                used.update((sib, sp))
+            else:
+                units.insert(0, [sib])
+                used.add(sib)
 
-    others_g0 = [nid for nid in by_gen.get(0, []) if nid not in gen0_placed]
-    if others_g0:
-        gen0_units.insert(0, others_g0)
+        # Any remaining gen-0 relatives are shown individually/coupled if the
+        # database proves the couple.
+        for a, b in spouse_pairs:
+            if nodes[a]["gen"] != 0 or nodes[b]["gen"] != 0:
+                continue
+            if a not in used and b not in used:
+                units.insert(0, [a, b])
+                used.update((a, b))
 
-    total_g0_w = (sum(unit_width(u) for u in gen0_units)
-                  + (len(gen0_units) - 1) * FAMILY_GAP)
+        for nid in by_gen.get(0, []):
+            if nid not in used:
+                units.insert(0, [nid])
+                used.add(nid)
+
+        # Move the user's unit back to the centre after adding left-side units.
+        user_unit = next((x for x in units if self_id in x), None)
+        units = [x for x in units if x is not user_unit]
+        left = [x for i, x in enumerate(units) if i % 2 == 0]
+        right = [x for i, x in enumerate(units) if i % 2 == 1]
+        return left + [user_unit] + right
+
+    # ── PASS 1: Generation 0 ─────────────────────────────────────────────────
+    y0 = 0
+    gen0_units = make_gen0_units()
+    total_g0_w = sum(unit_width(x) for x in gen0_units) + max(0, len(gen0_units) - 1) * FAMILY_GAP
     cur_x = -(total_g0_w / 2) + NODE_W / 2
 
     for unit in gen0_units:
@@ -1784,194 +1947,156 @@ def _build_tree_data(uid):
             nodes[nid]["y"] = y0
         cur_x += unit_width(unit) + FAMILY_GAP
 
-    # ── Compute gen-0 union points ────────────────────────────────────────────
-    if spouse_id and spouse_id in nodes:
-        union_you_x = (nodes[self_id]["x"] + nodes[spouse_id]["x"]) / 2
+    # Union points for the two principal branches.
+    if nodes[self_id].get("spouseId"):
+        union_you_x = (
+            nodes[self_id]["x"] + nodes[nodes[self_id]["spouseId"]]["x"]
+        ) / 2
     else:
         union_you_x = nodes[self_id]["x"]
 
-    if sister_id and bil_id and sister_id in nodes and bil_id in nodes:
-        union_sib_x = (nodes[sister_id]["x"] + nodes[bil_id]["x"]) / 2
-    elif sister_id and sister_id in nodes:
-        union_sib_x = nodes[sister_id]["x"]
+    sibling_union_candidates = [
+        ((nodes[s]["x"] + nodes[nodes[s]["spouseId"]]["x"]) / 2)
+        for s in sibling_ids_all
+        if nodes[s].get("spouseId") and nodes[s]["spouseId"] in nodes
+    ]
+    if sibling_union_candidates:
+        union_sib_x = sum(sibling_union_candidates) / len(sibling_union_candidates)
+    elif sibling_ids_all:
+        union_sib_x = sum(nodes[s]["x"] for s in sibling_ids_all) / len(sibling_ids_all)
     else:
         union_sib_x = union_you_x
 
-    # ── PASS 2: Gen +1 ───────────────────────────────────────────────────────
-    you_children = [nid for nid, n in nodes.items()
-                    if n.get("parentUnionKey") == "union_you"]
-    sib_children = [nid for nid, n in nodes.items()
-                    if n.get("parentUnionKey") == "union_sib"]
-
-    y1 = 1 * ROW_H
+    # ── PASS 2: Generation +1 ────────────────────────────────────────────────
+    you_children = [
+        nid for nid, n in nodes.items()
+        if n.get("parentUnionKey") == "union_you"
+    ]
+    sib_children = [
+        nid for nid, n in nodes.items()
+        if n.get("parentUnionKey") == "union_sib"
+    ]
 
     def place_group_under(nids, center_x, y):
-        count = len(nids)
-        if count == 0:
+        if not nids:
             return
-        row_w = count * NODE_W + (count - 1) * H_GAP
+        row_w = len(nids) * NODE_W + (len(nids) - 1) * H_GAP
         sx = center_x - row_w / 2 + NODE_W / 2
         for i, nid in enumerate(nids):
             nodes[nid]["x"] = sx + i * (NODE_W + H_GAP)
             nodes[nid]["y"] = y
 
+    y1 = ROW_H
     place_group_under(you_children, union_you_x, y1)
     place_group_under(sib_children, union_sib_x, y1)
 
     g1_placed = set(you_children + sib_children)
     g1_others = [nid for nid in by_gen.get(1, []) if nid not in g1_placed]
     if g1_others:
-        max_x = max((nodes[nid]["x"] for nid in g1_placed), default=union_you_x)
+        row_w = len(g1_others) * NODE_W + (len(g1_others) - 1) * H_GAP
+        start_x = max(union_you_x, union_sib_x) + NODE_W + FAMILY_GAP
         for i, nid in enumerate(g1_others):
-            nodes[nid]["x"] = max_x + (i + 1) * (NODE_W + H_GAP)
+            nodes[nid]["x"] = start_x + i * (NODE_W + H_GAP)
             nodes[nid]["y"] = y1
 
-    # ── PASS 3: Ancestor rows (gen -1, -2, -3) with couple pairing ───────────
-    SINGLE_BLOOD_CHILD = {
-        "Paternal Grandfather": {"Father", "Stepfather"},
-        "Paternal Grandmother": {"Father", "Stepfather"},
-        "Maternal Grandfather": {"Mother", "Stepmother"},
-        "Maternal Grandmother": {"Mother", "Stepmother"},
-        "Great-grandfather":    {"Paternal Grandfather", "Maternal Grandfather",
-                                 "Paternal Grandmother", "Maternal Grandmother"},
-        "Great-grandmother":    {"Paternal Grandfather", "Maternal Grandfather",
-                                 "Paternal Grandmother", "Maternal Grandmother"},
-        "Sister's Father-in-law":  {"Brother-in-law", "Wife's Sister's Husband"},
-        "Sister's Mother-in-law":  {"Brother-in-law", "Wife's Sister's Husband"},
-        "Brother's Father-in-law": {"Husband's Sister", "Brother's Wife"},
-        "Brother's Mother-in-law": {"Husband's Sister", "Brother's Wife"},
-    }
-
-    def get_target_x(nid, child_nids):
-        """Return the X of the blood child this ancestor should sit above."""
-        rel = nodes[nid]["relation"]
-        target_rels = SINGLE_BLOOD_CHILD.get(rel)
-        if target_rels:
-            t = next((cnid for cnid in child_nids
-                      if nodes[cnid]["relation"] in target_rels
-                      and "x" in nodes[cnid]), None)
-            if t:
-                return nodes[t]["x"]
+    # ── PASS 3: Ancestors ────────────────────────────────────────────────────
+    def nearest_child_x(nid, child_nids):
+        best = None
+        best_dist = None
+        for child in child_nids:
+            if "x" not in nodes[child]:
+                continue
+            cu = nodes[child].get("uid")
+            nu = nodes[nid].get("uid")
+            if nu and cu and is_parent_edge(nu, cu):
+                d = abs(nodes[nid].get("x", 0) - nodes[child]["x"])
+                if best_dist is None or d < best_dist:
+                    best = child
+                    best_dist = d
+        if best:
+            return nodes[best]["x"]
         return None
-
-    SIB_PIL_RELS = {"Sister's Father-in-law", "Sister's Mother-in-law",
-                    "Brother's Father-in-law", "Brother's Mother-in-law"}
 
     for gen_level in sorted([g for g in by_gen if g < 0], reverse=True):
         nids = by_gen[gen_level]
-        y    = gen_level * ROW_H
-        placed_in_gen = set()
-        child_gen_nids = by_gen.get(gen_level + 1, [])
+        y = gen_level * ROW_H
+        couples = [
+            ac for ac in ancestor_couples
+            if ac["gen"] == gen_level and not ac.get("isSibPil")
+        ]
+        couple_nids = {x for ac in couples for x in (ac["nid_a"], ac["nid_b"])}
+        placed = set()
 
-        # ── SIB_PIL nodes: place as a couple unit above Brother-in-law ──────
-        # MallaReddy (Sister's Father-in-law) + rajamma (Sister's Mother-in-law)
-        # should sit together above Kotha Satish Reddy (BIL) in the gen-0 row.
+        # Sibling in-law parents are placed above the exact spouse they belong to.
         if gen_level == -1:
-            sib_pil_nids = [nid for nid in nids if nodes[nid]["relation"] in SIB_PIL_RELS]
+            for ac in [x for x in ancestor_couples if x["gen"] == -1 and x.get("isSibPil")]:
+                a, b = ac["nid_a"], ac["nid_b"]
+                child = ac.get("child_nid")
+                if not child or child not in nodes:
+                    continue
+                child_x = nodes[child]["x"]
+                group_w = unit_width([a, b])
+                start_x = child_x - group_w / 2 + NODE_W / 2
+                for j, nid in enumerate([a, b]):
+                    nodes[nid]["x"] = start_x + j * (NODE_W + COUPLE_GAP)
+                    nodes[nid]["y"] = y
+                    placed.add(nid)
 
-            if sib_pil_nids:
-                # Find the BIL target x — the gen-0 node who is their child
-                gen0_nids = by_gen.get(0, [])
-                bil_target_nid = next(
-                    (gnid for gnid in gen0_nids
-                     if nodes[gnid]["relation"] in {"Brother-in-law", "Wife's Sister's Husband"}),
-                    None
-                )
+        units = [[ac["nid_a"], ac["nid_b"]] for ac in couples]
+        singles = [
+            [nid] for nid in nids
+            if nid not in couple_nids and nid not in placed
+        ]
 
-                if bil_target_nid and "x" in nodes[bil_target_nid]:
-                    bil_x = nodes[bil_target_nid]["x"]
-                    # Place the SIB_PIL couple centred above the BIL node
-                    count = len(sib_pil_nids)
-                    group_w = count * NODE_W + (count - 1) * COUPLE_GAP
-                    start_x = bil_x - group_w / 2 + NODE_W / 2
-                    for i, nid in enumerate(sib_pil_nids):
-                        nodes[nid]["x"] = start_x + i * (NODE_W + COUPLE_GAP)
-                        nodes[nid]["y"] = y
-                        placed_in_gen.add(nid)
-                    # Mark them as a couple for JS marriage bar
-                    if len(sib_pil_nids) == 2:
-                        nodes[sib_pil_nids[0]]["spouseId"] = sib_pil_nids[1]
-                        nodes[sib_pil_nids[1]]["spouseId"] = sib_pil_nids[0]
-                        # Add to ancestor_couples so JS draws edge to BIL
-                        # isSibPil=True tells JS NOT to treat this as a parent→Kavitha edge
-                        ancestor_couples.append({
-                            "nid_a": sib_pil_nids[0], "nid_b": sib_pil_nids[1],
-                            "gen": -1, "child_nid": bil_target_nid,
-                            "isSibPil": True
-                        })
-                else:
-                    # BIL not found — place SIB_PIL to far left (not -9999)
-                    # so they are visible but clearly separate
-                    gen0_xs = [nodes[gnid]["x"] for gnid in gen0_nids if "x" in nodes[gnid]]
-                    far_left = (min(gen0_xs) if gen0_xs else 0) - (NODE_W + FAMILY_GAP) * len(sib_pil_nids)
-                    for i, nid in enumerate(sib_pil_nids):
-                        nodes[nid]["x"] = far_left + i * (NODE_W + COUPLE_GAP)
-                        nodes[nid]["y"] = y
-                        placed_in_gen.add(nid)
+        def unit_sort_key(unit):
+            if len(unit) == 1:
+                tx = nearest_child_x(unit[0], by_gen.get(gen_level + 1, []))
+                return tx if tx is not None else 999999
+            return sum(nodes[x].get("x", 0) for x in unit) / len(unit)
 
-        # Exclude SIB_PIL couples — they are already placed above BIL
-        gen_couples = [ac for ac in ancestor_couples
-                       if ac["gen"] == gen_level and not ac.get("isSibPil")]
-        couple_nids_set = set()
-        couple_units = []
-        for ac in gen_couples:
-            couple_units.append([ac["nid_a"], ac["nid_b"]])
-            couple_nids_set.update([ac["nid_a"], ac["nid_b"]])
+        units.extend(singles)
+        units.sort(key=unit_sort_key)
 
-        singles = [nid for nid in nids if nid not in couple_nids_set and nid not in placed_in_gen]
+        total_w = sum(unit_width(x) for x in units) + max(0, len(units) - 1) * H_GAP
+        cx = -(total_w / 2) + NODE_W / 2
 
-        all_units = couple_units + [[s] for s in singles]
-
-        if gen_level == -1:
-            # Anchor the Father+Mother couple above union_you_x (centre of you+spouse)
-            # so it never drifts into MallaReddy's column
-            total_w = sum(unit_width(u) for u in all_units) + max(0, len(all_units) - 1) * H_GAP
-            cx = union_you_x - total_w / 2 + NODE_W / 2
-        else:
-            def unit_sort_x(unit, child_nids=child_gen_nids):
-                if len(unit) == 1:
-                    tx = get_target_x(unit[0], child_nids)
-                    return tx if tx is not None else 999999
-                xs = [nodes[n]["x"] for n in unit if "x" in nodes[n]]
-                return sum(xs) / len(xs) if xs else 0
-            all_units.sort(key=unit_sort_x)
-            total_w = sum(unit_width(u) for u in all_units) + max(0, len(all_units) - 1) * H_GAP
-            cx = -(total_w / 2) + NODE_W / 2
-
-        for unit in all_units:
+        for unit in units:
             for j, nid in enumerate(unit):
                 nodes[nid]["x"] = cx + j * (NODE_W + COUPLE_GAP)
                 nodes[nid]["y"] = y
-                placed_in_gen.add(nid)
+                placed.add(nid)
             cx += unit_width(unit) + H_GAP
 
-    # ── PASS 4: Descendant rows (gen +2, +3) ─────────────────────────────────
+    # ── PASS 4: Descendant rows +2/+3 ─────────────────────────────────────────
     for gen, nids in by_gen.items():
         if gen <= 1:
             continue
-        count = len(nids)
-        row_w = count * NODE_W + (count - 1) * H_GAP
+        row_w = len(nids) * NODE_W + max(0, len(nids) - 1) * H_GAP
         start_x = -(row_w / 2) + NODE_W / 2
         y = gen * ROW_H
         for i, nid in enumerate(nids):
             nodes[nid]["x"] = start_x + i * (NODE_W + H_GAP)
             nodes[nid]["y"] = y
 
-    # ── Store metadata for JS ─────────────────────────────────────────────────
-    nodes[self_id]["_unionYou"]        = {"x": union_you_x, "y": y0}
-    nodes[self_id]["_unionSib"]        = {"x": union_sib_x, "y": y0}
-    nodes[self_id]["_siblingIds"]      = sibling_ids_all
-    nodes[self_id]["_youChildren"]     = you_children
-    nodes[self_id]["_sibChildren"]     = sib_children
-    nodes[self_id]["_siblingCouples"]  = ([[sister_id, bil_id]] if (sister_id and bil_id) else
-                                          ([[sister_id, None]] if sister_id else []))
+    # ── Metadata consumed by the existing JS edge renderer ───────────────────
+    nodes[self_id]["_unionYou"] = {"x": union_you_x, "y": y0}
+    nodes[self_id]["_unionSib"] = {"x": union_sib_x, "y": y0}
+    nodes[self_id]["_siblingIds"] = sibling_ids_all
+    nodes[self_id]["_youChildren"] = you_children
+    nodes[self_id]["_sibChildren"] = sib_children
+    nodes[self_id]["_siblingCouples"] = sibling_couples
     nodes[self_id]["_ancestorCouples"] = [
-        {"nid_a": ac["nid_a"], "nid_b": ac["nid_b"], "gen": ac["gen"],
-         "child_nid": ac["child_nid"], "isSibPil": ac.get("isSibPil", False)}  
+        {
+            "nid_a": ac["nid_a"],
+            "nid_b": ac["nid_b"],
+            "gen": ac["gen"],
+            "child_nid": ac.get("child_nid"),
+            "isSibPil": ac.get("isSibPil", False),
+        }
         for ac in ancestor_couples
     ]
-    return nodes, self_id
 
+    return nodes, self_id
 
 def _family_tree_tab(uid):
     nodes, root_id = _build_tree_data(uid)
