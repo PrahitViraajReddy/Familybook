@@ -1662,6 +1662,148 @@ def _build_tree_data(uid):
             continue
         edge[(int(owner), int(target))] = normalize_relation(lk.get("relation", ""))
 
+    # Expand the graph one hop beyond the current user's direct links.
+    # Direct links alone are insufficient for sibling branches: e.g. the
+    # current user may know Father + Paternal Grandfather, while the
+    # Grandfather's other child (Paternal Uncle/Aunt) is stored on the
+    # Grandfather's profile. Discover those registered relatives here.
+    direct_member_ids = set(member_ids)
+    expanded_owner_ids = set(direct_member_ids)
+
+    if direct_member_ids:
+        owner_links = q_all(
+            """
+            SELECT fl.*,
+                   u.full_name AS linked_name,
+                   u.dynasty_name AS linked_dynasty,
+                   u.profile_photo AS linked_photo,
+                   u.dob AS linked_dob,
+                   u.gender AS linked_gender,
+                   u.current_city AS linked_city,
+                   u.occupation AS linked_occ
+            FROM family_links fl
+            LEFT JOIN users u ON u.id = fl.member_id
+            WHERE fl.user_id = ANY(%s)
+              AND fl.member_id IS NOT NULL
+            """,
+            (list(direct_member_ids),)
+        )
+
+        known_target_ids = {
+            int(lk["member_id"]) for lk in links
+            if lk.get("member_id") is not None
+        }
+
+        direct_relation_by_uid = {
+            int(lk["member_id"]): normalize_relation(lk.get("relation", ""))
+            for lk in links
+            if lk.get("member_id") is not None
+        }
+
+        discovered = []
+        for lk in owner_links:
+            target_id = int(lk["member_id"])
+            if target_id in known_target_ids or target_id == int(uid):
+                continue
+
+            owner_id = int(lk["user_id"])
+            owner_rel = direct_relation_by_uid.get(owner_id, "")
+            stored_rel = normalize_relation(lk.get("relation", ""))
+
+            # Derive the target's relation to the current user from the
+            # known owner's position in the family graph.
+            derived_rel = None
+            if owner_rel in {"Father", "Stepfather"}:
+                if stored_rel in {"Brother", "Stepbrother"}:
+                    derived_rel = "Paternal Uncle"
+                elif stored_rel in {"Sister", "Stepsister"}:
+                    derived_rel = "Paternal Aunt"
+            elif owner_rel in {"Mother", "Stepmother"}:
+                if stored_rel in {"Brother", "Stepbrother"}:
+                    derived_rel = "Maternal Uncle"
+                elif stored_rel in {"Sister", "Stepsister"}:
+                    derived_rel = "Maternal Aunt"
+            elif owner_rel == "Paternal Grandfather" or owner_rel == "Paternal Grandmother":
+                if stored_rel in {"Son", "Stepson"}:
+                    derived_rel = "Paternal Uncle"
+                elif stored_rel in {"Daughter", "Stepdaughter"}:
+                    derived_rel = "Paternal Aunt"
+            elif owner_rel == "Maternal Grandfather" or owner_rel == "Maternal Grandmother":
+                if stored_rel in {"Son", "Stepson"}:
+                    derived_rel = "Maternal Uncle"
+                elif stored_rel in {"Daughter", "Stepdaughter"}:
+                    derived_rel = "Maternal Aunt"
+
+            if not derived_rel:
+                continue
+
+            synthetic = dict(lk)
+            synthetic["relation"] = derived_rel
+            synthetic["member_name"] = lk.get("linked_name") or lk.get("member_name")
+            synthetic["id"] = f"expanded_{owner_id}_{target_id}_{derived_rel}"
+            discovered.append(synthetic)
+            known_target_ids.add(target_id)
+
+        # Also discover spouses of newly discovered blood-side relatives.
+        discovered_ids = {
+            int(lk["member_id"]) for lk in discovered
+            if lk.get("member_id") is not None
+        }
+        if discovered_ids:
+            spouse_rows = q_all(
+                """
+                SELECT fl.*,
+                       u.full_name AS linked_name,
+                       u.dynasty_name AS linked_dynasty,
+                       u.profile_photo AS linked_photo,
+                       u.dob AS linked_dob,
+                       u.gender AS linked_gender,
+                       u.current_city AS linked_city,
+                       u.occupation AS linked_occ
+                FROM family_links fl
+                LEFT JOIN users u ON u.id = fl.member_id
+                WHERE fl.user_id = ANY(%s)
+                  AND fl.member_id IS NOT NULL
+                  AND fl.relation IN ('Husband', 'Wife', 'Partner')
+                """,
+                (list(discovered_ids),)
+            )
+
+            blood_rel_by_id = {
+                int(lk["member_id"]): normalize_relation(lk.get("relation", ""))
+                for lk in discovered
+                if lk.get("member_id") is not None
+            }
+
+            for lk in spouse_rows:
+                target_id = int(lk["member_id"])
+                if target_id in known_target_ids or target_id == int(uid):
+                    continue
+
+                owner_id = int(lk["user_id"])
+                blood_rel = blood_rel_by_id.get(owner_id, "")
+                if blood_rel == "Paternal Uncle":
+                    derived_rel = "Paternal Uncle's Wife"
+                elif blood_rel == "Paternal Aunt":
+                    derived_rel = "Paternal Aunt's Husband"
+                elif blood_rel == "Maternal Uncle":
+                    derived_rel = "Maternal Uncle's Wife"
+                elif blood_rel == "Maternal Aunt":
+                    derived_rel = "Maternal Aunt's Husband"
+                else:
+                    continue
+
+                synthetic = dict(lk)
+                synthetic["relation"] = derived_rel
+                synthetic["member_name"] = lk.get("linked_name") or lk.get("member_name")
+                synthetic["id"] = f"expanded_spouse_{owner_id}_{target_id}_{derived_rel}"
+                discovered.append(synthetic)
+                known_target_ids.add(target_id)
+
+        # Add only genuinely discovered nodes; direct user links remain the
+        # primary source and keep their original relationship labels.
+        links = list(links) + discovered
+
     # Node id is stable for the current tree render.
     nodes = {}
     self_id = f"self_{uid}"
