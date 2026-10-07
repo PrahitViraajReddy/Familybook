@@ -1804,6 +1804,22 @@ def _build_tree_data(uid):
         # primary source and keep their original relationship labels.
         links = list(links) + discovered
 
+        # Spouse rows for newly discovered relatives were not part of the
+        # original network query, so include them in the relationship edge
+        # graph as well. This lets actual Aunt↔Fufaji / Uncle↔Chachi edges
+        # pair normally.
+        if discovered_ids:
+            network_links = list(network_links) + spouse_rows
+
+    # Rebuild the edge map after graph expansion.
+    edge = {}
+    for lk in network_links:
+        owner = lk.get("user_id")
+        target = lk.get("member_id")
+        if owner is None or target is None:
+            continue
+        edge[(int(owner), int(target))] = normalize_relation(lk.get("relation", ""))
+
     # Node id is stable for the current tree render.
     nodes = {}
     self_id = f"self_{uid}"
