@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import bcrypt
