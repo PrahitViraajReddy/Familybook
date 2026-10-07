@@ -2224,6 +2224,43 @@ def _family_tree_tab(uid):
     zoom_val   = zoom / 100.0
     spjs = "true" if show_photos else "false"
 
+    # Parent-side connectors are generated server-side from the already-resolved
+    # graph coordinates. This deliberately avoids injecting new JavaScript into
+    # the Python f-string.
+    side_parent_map = {
+        "Paternal Uncle": {"Father", "Stepfather"},
+        "Elder Paternal Uncle": {"Father", "Stepfather"},
+        "Paternal Aunt": {"Father", "Stepfather"},
+        "Maternal Uncle": {"Mother", "Stepmother"},
+        "Maternal Aunt": {"Mother", "Stepmother"},
+    }
+    side_edges = []
+    for nid, n in nodes.items():
+        rel = n.get("relation")
+        if rel not in side_parent_map:
+            continue
+        target = next(
+            (
+                p for p in nodes.values()
+                if p.get("gen") == -1
+                and p.get("relation") in side_parent_map[rel]
+            ),
+            None,
+        )
+        if not target:
+            continue
+        spouse = nodes.get(n.get("spouseId")) if n.get("spouseId") else None
+        family_x = (n["x"] + spouse["x"]) / 2 if spouse else n["x"]
+        branch_y = n["y"] + NODE_H / 2 + 24
+        side_edges.append(
+            f'<path d="M {family_x:.1f} {n["y"] + NODE_H / 2:.1f} '
+            f'V {branch_y:.1f} H {target["x"]:.1f} '
+            f'V {target["y"] + NODE_H / 2:.1f}" '
+            f'stroke="#2563EB99" stroke-width="1.8" fill="none" '
+            f'stroke-linejoin="round"/>'
+        )
+    side_edges_html = "".join(side_edges)
+
     tree_html = f"""<!DOCTYPE html><html><head><meta charset="utf-8">
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@600;700&family=DM+Sans:wght@400;500&display=swap');
@@ -2275,7 +2312,7 @@ svg#edges{{position:absolute;top:0;left:0;overflow:visible;pointer-events:none;}
 </style></head><body>
 <div id="viewport">
   <div id="world">
-    <svg id="edges"></svg>
+    <svg id="edges">{side_edges_html}</svg>
     <div id="nodes-layer"></div>
     <div id="gen-labels"></div>
   </div>
