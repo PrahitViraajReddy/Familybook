@@ -2224,6 +2224,83 @@ def _family_tree_tab(uid):
     zoom_val   = zoom / 100.0
     spjs = "true" if show_photos else "false"
 
+    side_connector_js = r"""\
+  // ── 3c. Parent-side relatives ──────────────────────────────────────────
+  // Blood-side relatives connect to the correct parent. Their spouses connect
+  // to the blood relative, not directly to Father/Mother.
+  const SIDE_TO_PARENT = new Map([
+    ['Paternal Uncle', ['Father','Stepfather']],
+    ['Elder Paternal Uncle', ['Father','Stepfather']],
+    ['Paternal Aunt', ['Father','Stepfather']],
+    ['Maternal Uncle', ['Mother','Stepmother']],
+    ['Maternal Aunt', ['Mother','Stepmother']]
+  ]);
+  const SPOUSE_SIDE_RELATIONS = new Set([
+    "Paternal Aunt's Husband",
+    "Paternal Uncle's Wife",
+    "Maternal Uncle's Wife",
+    "Maternal Aunt's Husband"
+  ]);
+
+  const sideNodes = Object.values(NODES).filter(
+    n => n.gen===-1 && (SIDE_TO_PARENT.has(n.relation) || SPOUSE_SIDE_RELATIONS.has(n.relation))
+  );
+
+  const findSideBloodPartner = (side) => {
+    if(!side.spouseId || !NODES[side.spouseId]) return null;
+    const sp = NODES[side.spouseId];
+    return SIDE_TO_PARENT.has(sp.relation) ? sp : null;
+  };
+
+  let sideConnectorIndex = 0;
+  for(const side of sideNodes){
+    // Spouses of uncles/aunts attach to that exact blood relative.
+    if(SPOUSE_SIDE_RELATIONS.has(side.relation)){
+      const blood = findSideBloodPartner(side);
+      if(!blood) continue;
+
+      const x1 = blood.x;
+      const x2 = side.x;
+      const y1 = blood.y + NH/2;
+      const y2 = side.y + NH/2;
+
+      // Marriage edge only; the actual side-to-parent edge is drawn from the
+      // blood relative below.
+      const m = svgEl('line');
+      m.setAttribute('x1',x1); m.setAttribute('y1',y1);
+      m.setAttribute('x2',x2); m.setAttribute('y2',y2);
+      m.setAttribute('stroke',parentCol+'66'); m.setAttribute('stroke-width','1.6');
+      svg.appendChild(m);
+      continue;
+    }
+
+    if(!SIDE_TO_PARENT.has(side.relation)) continue;
+
+    const target = Object.values(NODES).find(
+      p => p.gen===-1 && SIDE_TO_PARENT.get(side.relation).includes(p.relation)
+    );
+    if(!target) continue;
+
+    // Give each side family its own branch level. This prevents multiple
+    // uncles/aunts from merging into one fake parent T-bar.
+    const branchY = side.y + NH/2 + 20 + (sideConnectorIndex++ * 18);
+    const sideX = side.x;
+    const targetX = target.x;
+
+    const p = svgEl('path');
+    p.setAttribute(
+      'd',
+      `M${sideX},${side.y+NH/2} V${branchY} H${targetX} V${target.y+NH/2}`
+    );
+    p.setAttribute('stroke',parentCol+'66');
+    p.setAttribute('stroke-width','1.6');
+    p.setAttribute('fill','none');
+    p.setAttribute('stroke-linejoin','round');
+    svg.appendChild(p);
+  }
+
+    """
+
     tree_html = f"""<!DOCTYPE html><html><head><meta charset="utf-8">
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@600;700&family=DM+Sans:wght@400;500&display=swap');
@@ -2608,80 +2685,7 @@ function drawEdges(){{
     }}
   }}
 
-  // ── 3c. Parent-side relatives ──────────────────────────────────────────
-  // Blood-side relatives connect to the correct parent. Their spouses connect
-  // to the blood relative, not directly to Father/Mother.
-  const SIDE_TO_PARENT = new Map([
-    ['Paternal Uncle', ['Father','Stepfather']],
-    ['Elder Paternal Uncle', ['Father','Stepfather']],
-    ['Paternal Aunt', ['Father','Stepfather']],
-    ['Maternal Uncle', ['Mother','Stepmother']],
-    ['Maternal Aunt', ['Mother','Stepmother']]
-  ]);
-  const SPOUSE_SIDE_RELATIONS = new Set([
-    "Paternal Aunt's Husband",
-    "Paternal Uncle's Wife",
-    "Maternal Uncle's Wife",
-    "Maternal Aunt's Husband"
-  ]);
-
-  const sideNodes = Object.values(NODES).filter(
-    n => n.gen===-1 && (SIDE_TO_PARENT.has(n.relation) || SPOUSE_SIDE_RELATIONS.has(n.relation))
-  );
-
-  const findSideBloodPartner = (side) => {{
-    if(!side.spouseId || !NODES[side.spouseId]) return null;
-    const sp = NODES[side.spouseId];
-    return SIDE_TO_PARENT.has(sp.relation) ? sp : null;
-  }};
-
-  let sideConnectorIndex = 0;
-  for(const side of sideNodes){{
-    // Spouses of uncles/aunts attach to that exact blood relative.
-    if(SPOUSE_SIDE_RELATIONS.has(side.relation)){{
-      const blood = findSideBloodPartner(side);
-      if(!blood) continue;
-
-      const x1 = blood.x;
-      const x2 = side.x;
-      const y1 = blood.y + NH/2;
-      const y2 = side.y + NH/2;
-
-      // Marriage edge only; the actual side-to-parent edge is drawn from the
-      // blood relative below.
-      const m = svgEl('line');
-      m.setAttribute('x1',x1); m.setAttribute('y1',y1);
-      m.setAttribute('x2',x2); m.setAttribute('y2',y2);
-      m.setAttribute('stroke',parentCol+'66'); m.setAttribute('stroke-width','1.6');
-      svg.appendChild(m);
-      continue;
-    }}
-
-    if(!SIDE_TO_PARENT.has(side.relation)) continue;
-
-    const target = Object.values(NODES).find(
-      p => p.gen===-1 && SIDE_TO_PARENT.get(side.relation).includes(p.relation)
-    );
-    if(!target) continue;
-
-    // Give each side family its own branch level. This prevents multiple
-    // uncles/aunts from merging into one fake parent T-bar.
-    const branchY = side.y + NH/2 + 20 + (sideConnectorIndex++ * 18);
-    const sideX = side.x;
-    const targetX = target.x;
-
-    const p = svgEl('path');
-    p.setAttribute(
-      'd',
-      `M${{sideX}},${{side.y+NH/2}} V${{branchY}} H${{targetX}} V${{target.y+NH/2}}`
-    );
-    p.setAttribute('stroke',parentCol+'66');
-    p.setAttribute('stroke-width','1.6');
-    p.setAttribute('fill','none');
-    p.setAttribute('stroke-linejoin','round');
-    svg.appendChild(p);
-  }}
-
+{side_connector_js}
   // ── 4 & 5. Ancestors gen ≤ -2 ─────────────────────────────────────────────
   //
   // Coupled pairs: stem drops from couple midpoint to their SPECIFIC blood child
