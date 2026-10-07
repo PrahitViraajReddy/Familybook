@@ -2569,53 +2569,6 @@ function drawEdges(){{
     }}
   }}
 
-  // ── 3c. Parent-generation side relatives ────────────────────────────────
-  // Paternal/Maternal uncles and aunts are siblings of Father/Mother, not
-  // additional parents of the current user. Connect them to the correct
-  // parent branch instead of sending them into the parent union.
-  const SIDE_REL_TARGETS = {{
-    'Paternal Uncle': new Set(['Father','Stepfather']),
-    'Elder Paternal Uncle': new Set(['Father','Stepfather']),
-    'Paternal Aunt': new Set(['Father','Stepfather']),
-    'Paternal Uncle\'s Wife': new Set(['Father','Stepfather']),
-    'Paternal Aunt\'s Husband': new Set(['Father','Stepfather']),
-    'Maternal Uncle': new Set(['Mother','Stepmother']),
-    'Maternal Aunt': new Set(['Mother','Stepmother']),
-    'Maternal Uncle\'s Wife': new Set(['Mother','Stepmother']),
-    'Maternal Aunt\'s Husband': new Set(['Mother','Stepmother'])
-  }};
-  const sideRelNodes = Object.values(NODES).filter(
-    n => n.gen===-1 && SIDE_REL_TARGETS[n.relation]
-  );
-  for(const side of sideRelNodes){{
-    const targets = Object.values(NODES).filter(
-      p => p.gen===-1 && SIDE_REL_TARGETS[side.relation].has(p.relation)
-    );
-    if(!targets.length) continue;
-    const target = targets.reduce((a,b)=>
-      Math.abs(a.x-side.x) <= Math.abs(b.x-side.x) ? a : b
-    );
-
-    // Same-generation relatives get a sibling-style bar below the cards,
-    // avoiding a diagonal/vertical line through the nodes.
-    const y = target.y + NH/2 + 22;
-    const x1 = Math.min(target.x, side.x);
-    const x2 = Math.max(target.x, side.x);
-    const h = svgEl('line');
-    h.setAttribute('x1', x1); h.setAttribute('y1', y);
-    h.setAttribute('x2', x2); h.setAttribute('y2', y);
-    h.setAttribute('stroke', parentCol+'77'); h.setAttribute('stroke-width','1.6');
-    svg.appendChild(h);
-
-    for(const x of [target.x, side.x]){{
-      const v = svgEl('line');
-      v.setAttribute('x1', x); v.setAttribute('y1', target.y+NH/2);
-      v.setAttribute('x2', x); v.setAttribute('y2', y);
-      v.setAttribute('stroke', parentCol+'77'); v.setAttribute('stroke-width','1.6');
-      svg.appendChild(v);
-    }}
-  }}
-
   // ── 4 & 5. Ancestors gen ≤ -2 ─────────────────────────────────────────────
   //
   // Coupled pairs: stem drops from couple midpoint to their SPECIFIC blood child
