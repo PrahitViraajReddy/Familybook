@@ -2573,7 +2573,7 @@ function drawEdges(){{
   // Paternal/Maternal uncles and aunts are siblings of Father/Mother, not
   // additional parents of the current user. Connect them to the correct
   // parent branch instead of sending them into the parent union.
-  const SIDE_REL_TARGETS = {
+  const SIDE_REL_TARGETS = {{
     'Paternal Uncle': new Set(['Father','Stepfather']),
     'Elder Paternal Uncle': new Set(['Father','Stepfather']),
     'Paternal Aunt': new Set(['Father','Stepfather']),
@@ -2583,11 +2583,11 @@ function drawEdges(){{
     'Maternal Aunt': new Set(['Mother','Stepmother']),
     'Maternal Uncle\'s Wife': new Set(['Mother','Stepmother']),
     'Maternal Aunt\'s Husband': new Set(['Mother','Stepmother'])
-  };
+  }};
   const sideRelNodes = Object.values(NODES).filter(
     n => n.gen===-1 && SIDE_REL_TARGETS[n.relation]
   );
-  for(const side of sideRelNodes){
+  for(const side of sideRelNodes){{
     const targets = Object.values(NODES).filter(
       p => p.gen===-1 && SIDE_REL_TARGETS[side.relation].has(p.relation)
     );
@@ -2607,14 +2607,14 @@ function drawEdges(){{
     h.setAttribute('stroke', parentCol+'77'); h.setAttribute('stroke-width','1.6');
     svg.appendChild(h);
 
-    for(const x of [target.x, side.x]){
+    for(const x of [target.x, side.x]){{
       const v = svgEl('line');
       v.setAttribute('x1', x); v.setAttribute('y1', target.y+NH/2);
       v.setAttribute('x2', x); v.setAttribute('y2', y);
       v.setAttribute('stroke', parentCol+'77'); v.setAttribute('stroke-width','1.6');
       svg.appendChild(v);
-    }
-  }
+    }}
+  }}
 
   // ── 4 & 5. Ancestors gen ≤ -2 ─────────────────────────────────────────────
   //
