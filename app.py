@@ -2355,6 +2355,19 @@ def _build_tree_data(uid):
     nodes[self_id]["_youChildren"] = you_children
     nodes[self_id]["_sibChildren"] = sib_children
     nodes[self_id]["_siblingCouples"] = sibling_couples
+
+    # Explicit graph edges for the renderer. These are the only edges allowed
+    # to define an ancestor -> child branch; relation labels are not enough.
+    nodes[self_id]["_parentEdges"] = [
+        [pid, cid]
+        for pid, pn in nodes.items()
+        for cid, cn in nodes.items()
+        if pid != cid
+        and pn.get("uid") is not None
+        and cn.get("uid") is not None
+        and is_parent_edge(pn["uid"], cn["uid"])
+    ]
+
     nodes[self_id]["_ancestorCouples"] = [
         {
             "nid_a": ac["nid_a"],
@@ -2455,6 +2468,10 @@ svg#edges{{position:absolute;top:0;left:0;overflow:visible;pointer-events:none;}
 const NODES = {nodes_json};
 const INIT_SCALE = {zoom_val};
 const SHOW_PHOTO = {spjs};
+const ROOT_ID = {json.dumps(root_id)};
+const PARENT_EDGES = new Set(
+  (NODES[ROOT_ID]._parentEdges || []).map(e => e[0] + '->' + e[1])
+);
 const GEN_COLOR = {{'-3':'#7C3AED','-2':'#4F46E5','-1':'#2563EB','0':'#C9A84C','1':'#059669','2':'#D97706','3':'#DC2626'}};
 const GEN_LABEL = {{'-3':'Great-grandparents','-2':'Grandparents','-1':'Parents','0':'Your Generation','1':'Children','2':'Grandchildren','3':'Great-grandchildren'}};
 function gc(g){{return GEN_COLOR[String(g)]||'#9CA3AF';}}
@@ -2838,12 +2855,13 @@ function drawEdges(){{
     const adjGen = n.gen + 1;
     const adjNodes = Object.values(NODES).filter(p=>p.gen===adjGen);
     if(!adjNodes.length) continue;
-    // A single grandparent can have multiple children. Connect to every
-    // proven child, not only the nearest/first child.
-    const relTargets = SINGLE_ANCESTOR_TARGET[n.relation];
-    const provenTargets = relTargets
-      ? adjNodes.filter(p=>relTargets.has(p.relation))
-      : [];
+    // Use actual database parent-child edges. Never restrict a
+    // grandparent to Father/Mother by relation-name alone.
+    const provenTargets = adjNodes.filter(p => {{
+      const a = n.id + '->' + p.id;
+      const b = p.id + '->' + n.id;
+      return PARENT_EDGES.has(a) || PARENT_EDGES.has(b);
+    }});
 
     if(provenTargets.length){{
       for(const target of provenTargets){{
