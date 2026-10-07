@@ -503,7 +503,7 @@ RELATION_GEN = {
     "Sister's Father-in-law": -1, "Sister's Mother-in-law": -1,
     "Brother's Father-in-law": -1, "Brother's Mother-in-law": -1,
     # Aunts & Uncles extended
-    "Maternal Uncle's Wife": -1, "Paternal Aunt's Husband": -1,
+    "Maternal Uncle's Wife": -1, "Paternal Uncle's Wife": -1, "Paternal Aunt's Husband": -1,
     # Nephews & Nieces extended
     "Nephew's Wife": 1, "Niece's Husband": 1,
     "Grand Nephew": 2, "Grand Niece": 2,
@@ -617,8 +617,9 @@ INVERSE_RELATION = {
     "Brother's Father-in-law": "Son-in-law",
     "Brother's Mother-in-law": "Son-in-law",
     # Aunts & Uncles extended
-    "Maternal Uncle's Wife":    "Nephew",
-    "Paternal Aunt's Husband": "Nephew",
+    "Maternal Uncle's Wife":    "Maternal Uncle",
+    "Paternal Uncle's Wife": "Paternal Uncle",
+    "Paternal Aunt's Husband": "Paternal Aunt",
     # Nephews & Nieces extended
     "Nephew's Wife":   "Paternal Uncle",
     "Niece's Husband": "Paternal Uncle",
