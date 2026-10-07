@@ -2864,9 +2864,9 @@ function drawEdges(){{
     // Use actual database parent-child edges. Never restrict a
     // grandparent to Father/Mother by relation-name alone.
     const provenTargets = adjNodes.filter(p => {{
-      const a = n.id + '->' + p.id;
-      const b = p.id + '->' + n.id;
-      return PARENT_EDGES.has(a) || PARENT_EDGES.has(b);
+      const a = n.uid + '->' + p.uid;
+      const b = p.uid + '->' + n.uid;
+      return n.uid && p.uid && (PARENT_EDGES.has(a) || PARENT_EDGES.has(b));
     }});
 
     if(provenTargets.length){{
