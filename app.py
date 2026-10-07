@@ -1685,7 +1685,6 @@ def _build_tree_data(uid):
             FROM family_links fl
             LEFT JOIN users u ON u.id = fl.member_id
             WHERE fl.user_id = ANY(%s)
-              AND fl.member_id IS NOT NULL
             """,
             (list(direct_member_ids),)
         )
@@ -2452,7 +2451,12 @@ def _build_family_graph(uid, max_hops=5):
             if owner is None or target is None:
                 continue
             owner = int(owner)
-            target = int(target)
+            # Registered members use their real user ID. Manual/unregistered
+            # links have no member_id, so use the family_link row ID as a
+            # stable local graph-node ID. This lets them appear in the tree
+            # without pretending they are registered users.
+            target_raw = row.get("member_id")
+            target = int(target_raw) if target_raw is not None else f"manual:{int(row['id'])}"
             rel = normalize_relation(row.get("relation", ""))
             if not rel:
                 continue
@@ -2478,7 +2482,9 @@ def _build_family_graph(uid, max_hops=5):
                 })
                 seen_edge_keys.add(ek)
 
-            if target not in seen_owners:
+            # Only registered users can be traversed recursively. A manual
+            # node is a leaf until it is linked to a registered account.
+            if isinstance(target, int) and target not in seen_owners:
                 next_frontier.add(target)
 
         frontier = next_frontier
@@ -2518,7 +2524,10 @@ def _build_family_graph(uid, max_hops=5):
         if source == target:
             return
         if kind == "spouse":
-            key = ("spouse", min(source, target), max(source, target))
+            # IDs can be integers (registered) or manual:<link_id> strings.
+            # Sort by string form only for deterministic undirected spouse keys.
+            a_key, b_key = sorted((str(source), str(target)))
+            key = ("spouse", a_key, b_key)
         else:
             key = (kind, source, target)
         if key in edge_keys:
