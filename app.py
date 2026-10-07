@@ -2388,8 +2388,288 @@ def _build_tree_data(uid):
 
     return nodes, self_id
 
+def _build_family_graph(uid, max_hops=5):
+    """Build a relationship graph from real family_links edges.
+
+    This is intentionally independent of the legacy tree layout code.
+    Relationships are facts (edges); generation/position is derived only
+    for visualization.
+    """
+    root_id = int(uid)
+
+    spouse_rels = {"Husband", "Wife", "Partner"}
+    child_rels = {"Son", "Daughter", "Stepson", "Stepdaughter",
+                  "Grandson", "Granddaughter", "Great-grandson", "Great-granddaughter"}
+    parent_rels = {"Father", "Mother", "Stepfather", "Stepmother",
+                   "Paternal Grandfather", "Paternal Grandmother",
+                   "Maternal Grandfather", "Maternal Grandmother",
+                   "Great-grandfather", "Great-grandmother",
+                   "Paternal Great-grandfather", "Paternal Great-grandmother",
+                   "Maternal Great-grandfather", "Maternal Great-grandmother"}
+
+    people = {}
+    raw_edges = []
+    seen_edge_keys = set()
+    frontier = {root_id}
+    seen_owners = set()
+
+    # Expand only through actual family_links records. No relation-name
+    # buckets are used to invent edges.
+    for _ in range(max_hops + 1):
+        frontier = frontier - seen_owners
+        if not frontier:
+            break
+
+        rows = q_all(
+            """
+            SELECT fl.*,
+                   u.full_name AS linked_name,
+                   u.dynasty_name AS linked_dynasty,
+                   u.profile_photo AS linked_photo,
+                   u.dob AS linked_dob,
+                   u.gender AS linked_gender,
+                   u.current_city AS linked_city,
+                   u.occupation AS linked_occ
+            FROM family_links fl
+            LEFT JOIN users u ON u.id = fl.member_id
+            WHERE fl.user_id = ANY(%s)
+              AND fl.member_id IS NOT NULL
+            """,
+            (list(frontier),)
+        )
+        seen_owners.update(frontier)
+
+        next_frontier = set()
+        for row in rows:
+            owner = row.get("user_id")
+            target = row.get("member_id")
+            if owner is None or target is None:
+                continue
+            owner = int(owner)
+            target = int(target)
+            rel = normalize_relation(row.get("relation", ""))
+            if not rel:
+                continue
+
+            if target not in people:
+                people[target] = {
+                    "uid": target,
+                    "name": row.get("linked_name") or row.get("member_name") or "Unknown",
+                    "dynasty": row.get("linked_dynasty") or "",
+                    "photo": row.get("linked_photo") or "",
+                    "dob": row.get("linked_dob"),
+                    "gender": row.get("linked_gender") or "",
+                    "city": row.get("linked_city") or "",
+                    "occupation": row.get("linked_occ") or "",
+                }
+
+            ek = (owner, target, rel)
+            if ek not in seen_edge_keys:
+                raw_edges.append({
+                    "source": owner,
+                    "target": target,
+                    "relation": rel,
+                })
+                seen_edge_keys.add(ek)
+
+            if target not in seen_owners:
+                next_frontier.add(target)
+
+        frontier = next_frontier
+
+    # Add the root user.
+    root_rows = q_all(
+        """
+        SELECT id, full_name, dynasty_name, profile_photo, dob, gender,
+               current_city, occupation
+        FROM users
+        WHERE id = %s
+        """,
+        (root_id,)
+    )
+    if root_rows:
+        ru = root_rows[0]
+        people[root_id] = {
+            "uid": root_id,
+            "name": ru.get("full_name") or "You",
+            "dynasty": ru.get("dynasty_name") or "",
+            "photo": ru.get("profile_photo") or "",
+            "dob": ru.get("dob"),
+            "gender": ru.get("gender") or "",
+            "city": ru.get("current_city") or "",
+            "occupation": ru.get("occupation") or "",
+        }
+
+    if not people:
+        return {}, []
+
+    # Convert raw relation records into canonical graph edges.
+    # Parent edges always point parent -> child.
+    edges = []
+    edge_keys = set()
+
+    def add_edge(source, target, kind, label):
+        if source == target:
+            return
+        if kind == "spouse":
+            key = ("spouse", min(source, target), max(source, target))
+        else:
+            key = (kind, source, target)
+        if key in edge_keys:
+            return
+        edge_keys.add(key)
+        edges.append({
+            "source": source,
+            "target": target,
+            "kind": kind,
+            "label": label,
+        })
+
+    for e in raw_edges:
+        rel = e["relation"]
+        a, b = e["source"], e["target"]
+
+        if rel in spouse_rels:
+            add_edge(a, b, "spouse", rel)
+        elif rel in child_rels:
+            add_edge(a, b, "parent", rel)
+        elif rel in parent_rels:
+            add_edge(b, a, "parent", rel)
+        elif rel in {"Brother", "Sister", "Stepbrother", "Stepsister"}:
+            add_edge(a, b, "sibling", rel)
+
+    # Direct relationship labels are authoritative for the current user.
+    direct = {}
+    for e in raw_edges:
+        if e["source"] == root_id:
+            direct[e["target"]] = e["relation"]
+
+    relation_labels = {root_id: "You"}
+    relation_labels.update(direct)
+
+    # Propagate useful human-readable labels through real graph edges.
+    # This is display metadata only; it never creates an edge.
+    changed = True
+    while changed:
+        changed = False
+        for e in raw_edges:
+            a, b, rel = e["source"], e["target"], e["relation"]
+            if a not in relation_labels:
+                continue
+            base = relation_labels[a]
+            candidate = None
+
+            if rel in spouse_rels:
+                spouse_map = {
+                    "Father": "Mother",
+                    "Mother": "Father",
+                    "Paternal Uncle": "Paternal Uncle's Wife",
+                    "Paternal Aunt": "Paternal Aunt's Husband",
+                    "Maternal Uncle": "Maternal Uncle's Wife",
+                    "Maternal Aunt": "Maternal Aunt's Husband",
+                    "Son": "Son's Wife",
+                    "Daughter": "Daughter's Husband",
+                }
+                candidate = spouse_map.get(base)
+            elif rel in {"Brother", "Stepbrother"}:
+                sibling_map = {
+                    "Father": "Paternal Uncle",
+                    "Mother": "Maternal Uncle",
+                    "Paternal Uncle": "Paternal Uncle",
+                    "Paternal Aunt": "Paternal Uncle",
+                }
+                candidate = sibling_map.get(base)
+            elif rel in {"Sister", "Stepsister"}:
+                sibling_map = {
+                    "Father": "Paternal Aunt",
+                    "Mother": "Maternal Aunt",
+                    "Paternal Uncle": "Paternal Aunt",
+                    "Paternal Aunt": "Paternal Aunt",
+                }
+                candidate = sibling_map.get(base)
+            elif rel in child_rels:
+                if base in {"Father", "Mother", "Paternal Uncle", "Paternal Aunt",
+                            "Maternal Uncle", "Maternal Aunt"}:
+                    candidate = "Child"
+            elif rel in parent_rels:
+                if base == "Father":
+                    candidate = "Paternal Grandfather"
+                elif base == "Mother":
+                    candidate = "Maternal Grandfather"
+
+            if candidate and b not in relation_labels:
+                relation_labels[b] = candidate
+                changed = True
+
+        # Also propagate labels backwards over parent edges.
+        for e in edges:
+            if e["kind"] != "parent":
+                continue
+            p, ch = e["source"], e["target"]
+            if ch in relation_labels and p not in relation_labels:
+                base = relation_labels[ch]
+                if base in {"You", "Son", "Daughter", "Child"}:
+                    relation_labels[p] = "Parent"
+                    changed = True
+
+    # Compute visualization levels from actual parent/spouse/sibling edges.
+    levels = {root_id: 0}
+    queue = [root_id]
+    adjacency = {}
+
+    def connect(a, b, delta):
+        adjacency.setdefault(a, []).append((b, delta))
+
+    for e in edges:
+        if e["kind"] == "parent":
+            connect(e["source"], e["target"], 1)
+            connect(e["target"], e["source"], -1)
+        elif e["kind"] in {"spouse", "sibling"}:
+            connect(e["source"], e["target"], 0)
+            connect(e["target"], e["source"], 0)
+
+    while queue:
+        cur = queue.pop(0)
+        for nxt, delta in adjacency.get(cur, []):
+            candidate = levels[cur] + delta
+            if nxt not in levels:
+                levels[nxt] = candidate
+                queue.append(nxt)
+
+    # Normalize any disconnected-but-discovered component to the root level.
+    for pid in people:
+        levels.setdefault(pid, 0)
+
+    nodes = []
+    for pid, person in people.items():
+        rel = relation_labels.get(pid, direct.get(pid, "Family Member"))
+        if pid == root_id:
+            rel = "You"
+
+        age = None
+        try:
+            if person.get("dob"):
+                age = calc_age(ensure_dob(person["dob"]))
+        except Exception:
+            age = None
+
+        nodes.append({
+            "id": pid,
+            "label": person["name"],
+            "relation": rel,
+            "level": levels.get(pid, 0),
+            "age": age,
+            "photo": person.get("photo", ""),
+            "city": person.get("city", ""),
+            "occupation": person.get("occupation", ""),
+            "isSelf": pid == root_id,
+        })
+
+    return nodes, edges
+
+
 def _family_tree_tab(uid):
-    nodes, root_id = _build_tree_data(uid)
+    nodes, edges = _build_family_graph(uid)
     if not nodes:
         st.markdown('<div class="msg-info">No family data. Add family links first.</div>', unsafe_allow_html=True)
         return
@@ -2397,719 +2677,238 @@ def _family_tree_tab(uid):
     col_t2, col_t3 = st.columns([1, 1])
     with col_t2:
         zoom = st.slider("Zoom %", 40, 180, st.session_state.tree_zoom, step=10,
-            key="tree_zoom_sl")
+            key="tree_zoom_sl_new")
         st.session_state.tree_zoom = zoom
     with col_t3:
-        show_photos = st.toggle("Show Photos", value=True, key="tree_photos")
+        show_photos = st.toggle("Show Photos", value=True, key="tree_photos_new")
 
-    nodes_json = json.dumps(nodes)
-    zoom_val   = zoom / 100.0
-    spjs = "true" if show_photos else "false"
+    # Convert graph IDs to strings for the browser.
+    node_items = []
+    for n in nodes:
+        node_items.append({
+            "id": str(n["id"]),
+            "label": n["label"],
+            "relation": n["relation"],
+            "level": n["level"],
+            "age": n["age"],
+            "photo": n["photo"],
+            "city": n["city"],
+            "occupation": n["occupation"],
+            "self": n["isSelf"],
+        })
 
-    tree_html = f"""<!DOCTYPE html><html><head><meta charset="utf-8">
+    edge_items = []
+    for e in edges:
+        edge_items.append({
+            "id": f'{e["kind"]}_{e["source"]}_{e["target"]}',
+            "from": str(e["source"]),
+            "to": str(e["target"]),
+            "kind": e["kind"],
+            "label": e["label"],
+            "arrows": "to" if e["kind"] == "parent" else "",
+        })
+
+    nodes_json = json.dumps(node_items, ensure_ascii=False)
+    edges_json = json.dumps(edge_items, ensure_ascii=False)
+    zoom_val = zoom / 100.0
+    photos_js = "true" if show_photos else "false"
+
+    tree_html = """<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<script src="https://unpkg.com/vis-network@9.1.9/standalone/umd/vis-network.min.js"></script>
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@600;700&family=DM+Sans:wght@400;500&display=swap');
-*{{box-sizing:border-box;margin:0;padding:0;}}
-html,body{{width:100%;height:100%;background:#FAF7F2;overflow:hidden;font-family:'DM Sans',sans-serif;}}
-#viewport{{width:100%;height:100%;overflow:hidden;position:relative;cursor:grab;user-select:none;}}
-#viewport.dragging{{cursor:grabbing;}}
-#world{{position:absolute;top:0;left:0;transform-origin:0 0;}}
-svg#edges{{position:absolute;top:0;left:0;overflow:visible;pointer-events:none;}}
-.node{{position:absolute;width:175px;background:white;border-radius:10px;
-  box-shadow:0 2px 12px rgba(0,0,0,.09);border:1.5px solid #e8e0d4;
-  padding:10px 10px 10px 14px;cursor:pointer;transition:box-shadow .15s,border-color .15s;}}
-.node:hover{{box-shadow:0 4px 20px rgba(92,61,46,.18);border-color:#C9A84C;}}
-.node.is-self{{background:#FFFDF4;border-color:#C9A84C;border-width:2px;box-shadow:0 0 0 4px rgba(201,168,76,.12),0 2px 12px rgba(0,0,0,.09);}}
-.node-stripe{{position:absolute;left:0;top:0;bottom:0;width:5px;border-radius:8px 0 0 8px;}}
-.node-inner{{display:flex;align-items:center;gap:8px;}}
-.avatar{{width:36px;height:36px;border-radius:50%;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-family:'Cormorant Garamond',serif;font-weight:700;font-size:13px;border:1.8px solid;overflow:hidden;}}
-.avatar img{{width:100%;height:100%;object-fit:cover;}}
-.node-text{{flex:1;min-width:0;}}
-.node-name{{font-family:'Cormorant Garamond',serif;font-size:12.5px;font-weight:700;color:#3D2314;
-  white-space:normal;overflow:hidden;text-overflow:ellipsis;line-height:1.2;word-break:break-word;}}
-.node-sub{{font-size:9.5px;color:#9CA3AF;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}}
-.node-rel{{font-size:8px;font-weight:600;letter-spacing:.5px;text-transform:uppercase;margin-top:3px;white-space:normal;word-break:break-word;}}
-.node-badge{{position:absolute;top:5px;right:6px;font-size:10px;}}
-#tooltip{{position:fixed;display:none;background:white;border:1.5px solid #C9A84C;border-radius:12px;
-  padding:11px 14px;box-shadow:0 6px 26px rgba(92,61,46,.18);min-width:175px;max-width:230px;
-  z-index:999;pointer-events:none;font-size:12.5px;color:#1C1C1C;}}
-.tt-rel{{font-size:9.5px;color:#C9A84C;font-weight:700;letter-spacing:1px;text-transform:uppercase;margin-bottom:3px;}}
-.tt-name{{font-family:'Cormorant Garamond',serif;font-size:15px;font-weight:700;color:#5C3D2E;line-height:1.2;margin-bottom:4px;}}
-.tt-row{{font-size:10.5px;color:#6B7280;line-height:1.7;}}
-.tt-badge{{display:inline-block;font-size:9.5px;padding:2px 7px;border-radius:20px;margin-top:4px;border:1px solid;}}
-.tt-v{{background:#EAF4EE;color:#3B5249;border-color:#3B5249;}}
-.tt-s{{background:#FDF3DC;color:#A0522D;border-color:#C9A84C;}}
-#gen-labels{{position:absolute;left:0;top:0;pointer-events:none;}}
-.gen-label{{position:absolute;font-size:9px;font-weight:600;letter-spacing:1.2px;text-transform:uppercase;
-  color:#C8B99A;background:rgba(250,247,242,.85);padding:2px 7px;border-radius:5px;white-space:nowrap;}}
-#controls{{position:absolute;top:10px;right:10px;display:flex;flex-direction:column;gap:4px;z-index:10;}}
-.ctrl-btn{{background:white;border:1.5px solid #F0EBE1;border-radius:8px;padding:5px 11px;
-  font-size:11px;cursor:pointer;color:#5C3D2E;box-shadow:0 1px 7px rgba(0,0,0,.07);
-  transition:all .13s;font-family:'DM Sans',sans-serif;}}
-.ctrl-btn:hover{{border-color:#C9A84C;background:#FFFBF2;}}
-#legend{{position:absolute;bottom:10px;left:10px;background:rgba(255,252,247,.96);border:1px solid #F0EBE1;
-  border-radius:10px;padding:7px 11px;font-size:10px;color:#8C9E8E;z-index:10;}}
-.lg-row{{display:flex;align-items:center;gap:5px;margin-bottom:3px;}}
-.lg-row:last-child{{margin-bottom:0;}}
-.lg-dot{{width:9px;height:9px;border-radius:3px;flex-shrink:0;}}
-#info-bar{{position:absolute;top:10px;left:10px;background:rgba(255,252,247,.96);border:1px solid #F0EBE1;
-  border-radius:9px;padding:6px 11px;font-size:10px;color:#8C9E8E;z-index:10;}}
-</style></head><body>
-<div id="viewport">
-  <div id="world">
-    <svg id="edges"></svg>
-    <div id="nodes-layer"></div>
-    <div id="gen-labels"></div>
-  </div>
-</div>
-<div id="tooltip"></div>
-<div id="controls">
-  <button class="ctrl-btn" onclick="resetView()">⟳ Reset</button>
-  <button class="ctrl-btn" onclick="zoomIn()">＋ Zoom</button>
-  <button class="ctrl-btn" onclick="zoomOut()">－ Zoom</button>
-</div>
-<div id="legend"></div>
-<div id="info-bar"></div>
+*{box-sizing:border-box}
+html,body{width:100%;height:100%;margin:0;background:#FAF7F2;overflow:hidden;
+  font-family:Arial,sans-serif}
+#graph{width:100%;height:100%}
+#hint{position:absolute;bottom:10px;left:50%;transform:translateX(-50%);
+  background:rgba(255,252,247,.95);padding:7px 13px;border-radius:8px;
+  color:#8b7b68;font-size:11px;pointer-events:none}
+#tip{position:fixed;display:none;z-index:20;background:white;border:1px solid #C9A84C;
+  border-radius:10px;padding:10px 13px;min-width:170px;max-width:240px;
+  box-shadow:0 5px 20px rgba(0,0,0,.15);pointer-events:none}
+.tiprel{font-size:9px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:#9b7830}
+.tipname{font-size:14px;font-weight:700;color:#3D2314;margin:3px 0}
+.tiprow{font-size:10px;color:#6B7280;line-height:1.5}
+</style>
+</head>
+<body>
+<div id="graph"></div>
+<div id="hint">Drag to pan · Scroll to zoom · Click a person for details</div>
+<div id="tip"></div>
 <script>
-const NODES = {nodes_json};
-const INIT_SCALE = {zoom_val};
-const SHOW_PHOTO = {spjs};
-const ROOT_ID = {json.dumps(root_id)};
-const PARENT_EDGES = new Set(
-  (NODES[ROOT_ID]._parentEdges || []).map(e => e[0] + '->' + e[1])
-);
-const GEN_COLOR = {{'-3':'#7C3AED','-2':'#4F46E5','-1':'#2563EB','0':'#C9A84C','1':'#059669','2':'#D97706','3':'#DC2626'}};
-const GEN_LABEL = {{'-3':'Great-grandparents','-2':'Grandparents','-1':'Parents','0':'Your Generation','1':'Children','2':'Grandchildren','3':'Great-grandchildren'}};
-function gc(g){{return GEN_COLOR[String(g)]||'#9CA3AF';}}
+const rawNodes = __NODES__;
+const rawEdges = __EDGES__;
+const showPhotos = __PHOTOS__;
+const zoom = __ZOOM__;
 
-const NW=175,NH=90,HGAP=40,VGAP=110;
-const viewport=document.getElementById('viewport');
-const world=document.getElementById('world');
-const svg=document.getElementById('edges');
-const nodesLayer=document.getElementById('nodes-layer');
-const genLabelsEl=document.getElementById('gen-labels');
-const tip=document.getElementById('tooltip');
+const palette = {
+  self:'#C9A84C',
+  parent:'#356AE6',
+  child:'#159B68',
+  ancestor:'#5B36D6',
+  family:'#356AE6'
+};
 
-let scale=INIT_SCALE,tx=0,ty=0,dragging=false,lastX=0,lastY=0;
+function levelColor(level, self){
+  if(self) return palette.self;
+  if(level < -1) return palette.ancestor;
+  if(level < 0) return palette.parent;
+  if(level > 0) return palette.child;
+  return palette.family;
+}
 
-// ── Build node DOM elements ──────────────────────────────────────────────────
-const nodeEls={{}};
-for(const [id,n] of Object.entries(NODES)){{
-  const col=n.isSelf?'#C9A84C':gc(n.gen);
-  const div=document.createElement('div');
-  div.className='node'+(n.isSelf?' is-self':'');
-  div.style.left=(n.x-NW/2)+'px';
-  div.style.top=(n.y-NH/2)+'px';
-  div.style.width=NW+'px';
-  div.style.minHeight=NH+'px';
-  const initials=(n.label||'').split(' ').slice(0,2).map(s=>(s[0]||'').toUpperCase()).join('');
-  const avatarContent=SHOW_PHOTO&&n.photo
-    ?`<img src="${{n.photo}}" alt="" onerror="this.style.display='none';this.nextSibling.style.display='flex'"><span style="display:none;width:100%;height:100%;align-items:center;justify-content:center;font-family:'Cormorant Garamond',serif;font-size:13px;font-weight:700;color:${{col}}">${{initials}}</span>`
-    :`<span style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-family:'Cormorant Garamond',serif;font-size:13px;font-weight:700;color:${{col}}">${{initials}}</span>`;
-  const subParts=[];
-  if(n.age) subParts.push('Age '+n.age);
-  if(n.city) subParts.push(n.city);
-  div.innerHTML=`
-    <div class="node-stripe" style="background:${{col}}"></div>
-    <div class="node-inner">
-      <div class="avatar" style="background:${{col}}18;border-color:${{col}}">${{avatarContent}}</div>
-      <div class="node-text">
-        <div class="node-name">${{n.label||''}}</div>
-        ${{subParts.length?`<div class="node-sub">${{subParts.join(' · ')}}</div>`:''}}
-        <div class="node-rel" style="color:${{col}}">${{n.relation||''}}</div>
-      </div>
-    </div>
-    <div class="node-badge">${{n.isSelf?'★':n.verified?'<span style="color:#059669">✓</span>':''}}</div>`;
-  div.addEventListener('mouseenter',e=>showTip(n,e));
-  div.addEventListener('mousemove',e=>moveTip(e));
-  div.addEventListener('mouseleave',()=>hideTip());
-  nodesLayer.appendChild(div);
-  nodeEls[id]=div;
-}}
+const visNodes = new vis.DataSet(rawNodes.map(n => {
+  const border = levelColor(n.level, n.self);
+  const title = n.relation || 'Family Member';
+  return {
+    id:n.id,
+    label:n.label + "\\n" + title.toUpperCase(),
+    level:n.level,
+    shape:'box',
+    margin:{top:11,right:13,bottom:11,left:13},
+    widthConstraint:{minimum:175,maximum:205},
+    heightConstraint:{minimum:70},
+    font:{
+      face:'Arial',
+      size:12,
+      color:'#3D2314',
+      multi:true
+    },
+    color:{
+      background:n.self ? '#FFFDF4' : '#FFFFFF',
+      border:border,
+      highlight:{background:'#FFFDF4',border:'#C9A84C'},
+      hover:{background:'#FFFFFF',border:'#C9A84C'}
+    },
+    borderWidth:n.self ? 2.5 : 1.5,
+    shadow:{enabled:true,size:8,x:0,y:2},
+    fixed:false
+  };
+}));
 
-// ── Draw SVG edges ────────────────────────────────────────────────────────────
-//
-// LAYOUT CONTRACT (set in Python):
-//   • Each gen-0 couple has spouseId set on both nodes.
-//   • Each gen+1 node has parentUnionKey = "union_you" | "union_sib".
-//   • selfNode._unionYou / ._unionSib carry the pre-computed midpoint x,y.
-//   • selfNode._youChildren / ._sibChildren list the nids in each group.
-//   • selfNode._siblingIds lists all sibling nids (for parent bar).
-//
-// EDGE RULES:
-//   1. Marriage bar: dashed horizontal between each gen-0 couple, at node centre y.
-//   2. Child T-bar stem starts from the MARRIAGE BAR (node centre y), not node bottom.
-//      Each family unit gets its own separate T-bar.
-//   3. Parents (gen -1): shared bar spanning bloodline children, each parent connects in.
-//   4. Grandparents (gen -2): each connects to its NEAREST gen-1 node independently
-//      (no shared bottleneck — two grandparents can connect to two different parents).
-//   5. Great-grandparents (gen -3): each connects to its nearest gen-2 node independently.
-//   6. Relation labels sit to the RIGHT of the drop line, never on it.
-//
-function drawEdges(){{
-  svg.innerHTML='';
-  const selfNode=Object.values(NODES).find(n=>n.isSelf);
-  if(!selfNode) return;
+const visEdges = new vis.DataSet(rawEdges.map(e => {
+  if(e.kind === 'spouse'){
+    return {
+      id:e.id, from:e.from, to:e.to,
+      color:{color:'#C9A84C',highlight:'#A47C21'},
+      width:2,
+      dashes:false,
+      arrows:'',
+      smooth:{type:'curvedCW',roundness:0.12},
+      label:'spouse',
+      font:{size:8,color:'#A47C21',background:'#FAF7F2'}
+    };
+  }
+  if(e.kind === 'sibling'){
+    return {
+      id:e.id, from:e.from, to:e.to,
+      color:{color:'#9CA3AF',highlight:'#6B7280'},
+      width:1.5,
+      dashes:[5,5],
+      arrows:'',
+      smooth:{type:'curvedCW',roundness:0.12}
+    };
+  }
+  return {
+    id:e.id, from:e.from, to:e.to,
+    color:{color:'#6B78E8',highlight:'#4352C8'},
+    width:2,
+    arrows:{to:{enabled:true,scaleFactor:0.65}},
+    smooth:{type:'cubicBezier',forceDirection:'vertical',roundness:0.35},
+    label:'',
+    font:{size:8,color:'#6B78E8',background:'#FAF7F2'}
+  };
+}));
 
-  function svgEl(tag){{return document.createElementNS('http://www.w3.org/2000/svg',tag);}}
+const container = document.getElementById('graph');
+const network = new vis.Network(container,{nodes:visNodes,edges:visEdges},{
+  autoResize:true,
+  layout:{
+    hierarchical:{
+      enabled:true,
+      direction:'UD',
+      sortMethod:'directed',
+      levelSeparation:145,
+      nodeSpacing:230,
+      treeSpacing:260,
+      blockShifting:true,
+      edgeMinimization:true,
+      parentCentralization:true
+    }
+  },
+  physics:false,
+  interaction:{
+    hover:true,
+    dragNodes:true,
+    dragView:true,
+    zoomView:true,
+    navigationButtons:false,
+    keyboard:true
+  },
+  nodes:{chosen:true},
+  edges:{selectionWidth:2},
+  manipulation:{enabled:false}
+});
 
-  const unionYou  = selfNode._unionYou || {{x:selfNode.x, y:selfNode.y}};
-  const unionSib  = selfNode._unionSib || {{x:selfNode.x, y:selfNode.y}};
-  const youChildIds = new Set(selfNode._youChildren||[]);
-  const sibChildIds = new Set(selfNode._sibChildren||[]);
+network.once('afterDrawing',()=>{
+  network.moveTo({scale:Math.max(0.35,Math.min(1.25,zoom)),animation:false});
+});
 
-  // ── Helper: simple elbow M→V→H→V ─────────────────────────────────────────
-  function elbow(x1,y1,x2,y2,col){{
-    const my=(y1+y2)/2;
-    const p=svgEl('path');
-    p.setAttribute('d',`M${{x1}},${{y1}} V${{my}} H${{x2}} V${{y2}}`);
-    p.setAttribute('stroke',col); p.setAttribute('stroke-width','1.8');
-    p.setAttribute('fill','none'); p.setAttribute('stroke-linejoin','round');
-    svg.appendChild(p);
-  }}
+const tip=document.getElementById('tip');
+network.on('hoverNode',params=>{
+  const n=rawNodes.find(x=>x.id===String(params.node));
+  if(!n)return;
+  tip.innerHTML =
+    '<div class="tiprel">'+(n.relation||'Family Member')+'</div>'+
+    '<div class="tipname">'+escapeHtml(n.label)+'</div>'+
+    (n.age!=null?'<div class="tiprow">Age '+n.age+'</div>':'')+
+    (n.city?'<div class="tiprow">'+escapeHtml(n.city)+'</div>':'')+
+    (n.occupation?'<div class="tiprow">'+escapeHtml(n.occupation)+'</div>':'');
+  tip.style.display='block';
+});
+network.on('blurNode',()=>tip.style.display='none');
+network.on('mousemove',p=>{
+  if(tip.style.display==='block'){
+    tip.style.left=(p.event.center ? p.event.center.x+14 : 14)+'px';
+    tip.style.top=(p.event.center ? p.event.center.y+14 : 14)+'px';
+  }
+});
+network.on('click',params=>{
+  if(params.nodes && params.nodes.length){
+    const n=rawNodes.find(x=>x.id===String(params.nodes[0]));
+    if(n){
+      tip.innerHTML =
+        '<div class="tiprel">'+(n.relation||'Family Member')+'</div>'+
+        '<div class="tipname">'+escapeHtml(n.label)+'</div>'+
+        (n.age!=null?'<div class="tiprow">Age '+n.age+'</div>':'')+
+        (n.city?'<div class="tiprow">'+escapeHtml(n.city)+'</div>':'')+
+        (n.occupation?'<div class="tiprow">'+escapeHtml(n.occupation)+'</div>':'');
+      tip.style.display='block';
+      tip.style.left='20px';
+      tip.style.top='20px';
+    }
+  }
+});
+function escapeHtml(v){
+  return String(v??'').replace(/[&<>"']/g,m=>({
+    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+  }[m]));
+}
+</script>
+</body>
+</html>"""
 
-  // ── Helper: relation label pill — offset to the right of drop line ────────
-  function relLabel(dropX, topY, txt, col){{
-    if(!txt) return;
-    const rw=Math.max(txt.length*5.2+10,34), rh=14;
-    // Place pill to the RIGHT of the drop line, vertically centred in upper third
-    const lx = dropX + rw/2 + 5;
-    const ly = topY + 20;   // 20px below the top of the drop, well above node
-    const bg=svgEl('rect');
-    bg.setAttribute('x',lx-rw/2); bg.setAttribute('y',ly-rh/2);
-    bg.setAttribute('width',rw);  bg.setAttribute('height',rh);
-    bg.setAttribute('rx','5');
-    bg.setAttribute('fill','rgba(255,252,247,0.97)');
-    bg.setAttribute('stroke',col+'55'); bg.setAttribute('stroke-width','0.8');
-    svg.appendChild(bg);
-    const t=svgEl('text');
-    t.setAttribute('x',lx); t.setAttribute('y',ly);
-    t.setAttribute('text-anchor','middle'); t.setAttribute('dominant-baseline','middle');
-    t.setAttribute('font-size','7.5'); t.setAttribute('fill',col);
-    t.setAttribute('font-family','DM Sans,sans-serif');
-    t.textContent=txt;
-    svg.appendChild(t);
-  }}
+    tree_html = tree_html.replace("__NODES__", nodes_json)
+    tree_html = tree_html.replace("__EDGES__", edges_json)
+    tree_html = tree_html.replace("__ZOOM__", str(zoom_val))
+    tree_html = tree_html.replace("__PHOTOS__", photos_js)
 
-  // ── 1. Marriage bars — ALL generations with a spouseId pair ─────────────
-  // Draw a dashed bar + heart between every couple, regardless of generation.
-  const marriageBarMidX = {{}};  // nodeId → midpoint x of their marriage bar
-  const mbDone=new Set();
-  for(const [id,n] of Object.entries(NODES)){{
-    if(!n.spouseId||mbDone.has(id)) continue;
-    const sp=NODES[n.spouseId];
-    if(!sp) continue;
-    mbDone.add(id); mbDone.add(n.spouseId);
-    const col = n.gen===0 ? '#C9A84C' : gc(n.gen);
-    const barY = n.y;
-    const xa=Math.min(n.x,sp.x)+NW/2, xb=Math.max(n.x,sp.x)-NW/2;
-    const midX=(n.x+sp.x)/2;
-    marriageBarMidX[id]=midX; marriageBarMidX[n.spouseId]=midX;
-    if(xb>xa){{
-      const ln=svgEl('line');
-      ln.setAttribute('x1',xa); ln.setAttribute('y1',barY);
-      ln.setAttribute('x2',xb); ln.setAttribute('y2',barY);
-      ln.setAttribute('stroke',col+'cc'); ln.setAttribute('stroke-width','2.2');
-      ln.setAttribute('stroke-dasharray','5 3');
-      svg.appendChild(ln);
-      const sym=svgEl('text');
-      sym.setAttribute('x',(xa+xb)/2); sym.setAttribute('y',barY-11);
-      sym.setAttribute('text-anchor','middle'); sym.setAttribute('dominant-baseline','middle');
-      sym.setAttribute('font-size','13'); sym.setAttribute('fill',col);
-      sym.textContent='♥';
-      svg.appendChild(sym);
-    }}
-  }}
+    components.html(tree_html, height=720, scrolling=False)
 
-  // ── 2. Child T-bars — stem from marriage bar midpoint ─────────────────────
-  function drawChildTBar(unionX, unionNodeY, childNids, col){{
-    if(!childNids.length) return;
-    const childNodes=childNids.map(id=>NODES[id]).filter(Boolean);
-    if(!childNodes.length) return;
 
-    const stemTopY = unionNodeY + NH/2;                // bottom edge of the node row
-    const barY     = stemTopY + VGAP * 0.42;           // child horizontal bar
-
-    const cxs  = childNodes.map(c=>c.x);
-    const barX1= Math.min(...cxs), barX2=Math.max(...cxs);
-
-    const vStem=svgEl('line');
-    vStem.setAttribute('x1',unionX); vStem.setAttribute('y1',stemTopY);
-    vStem.setAttribute('x2',unionX); vStem.setAttribute('y2',barY);
-    vStem.setAttribute('stroke',col); vStem.setAttribute('stroke-width','2');
-    svg.appendChild(vStem);
-
-    const hBar=svgEl('line');
-    hBar.setAttribute('x1',barX1); hBar.setAttribute('y1',barY);
-    hBar.setAttribute('x2',barX2); hBar.setAttribute('y2',barY);
-    hBar.setAttribute('stroke',col); hBar.setAttribute('stroke-width','2');
-    svg.appendChild(hBar);
-
-    for(const c of childNodes){{
-      const dropLine=svgEl('line');
-      dropLine.setAttribute('x1',c.x); dropLine.setAttribute('y1',barY);
-      dropLine.setAttribute('x2',c.x); dropLine.setAttribute('y2',c.y-NH/2);
-      dropLine.setAttribute('stroke',col); dropLine.setAttribute('stroke-width','1.8');
-      svg.appendChild(dropLine);
-      relLabel(c.x, barY, (c.relation||'').trim(), col);
-    }}
-  }}
-
-  const childCol = gc(1);
-  if(youChildIds.size)
-    drawChildTBar(unionYou.x, unionYou.y, [...youChildIds], childCol);
-  if(sibChildIds.size)
-    drawChildTBar(unionSib.x, unionSib.y, [...sibChildIds], childCol);
-
-  // ── 3. Parents (gen -1) → stem from couple union down to children bar ──────
-  //
-  // If Father+Mother are a detected couple: stem drops from their midpoint.
-  // Otherwise fall back to the old shared-bar approach.
-  //
-  const ancestorCouples = selfNode._ancestorCouples || [];
-  const sibIds     = (selfNode._siblingIds||[]);
-  // Exclude siblings who have a spouse (they connect via their own couple edge to parents)
-  const sibsWithSpouse = new Set(
-    Object.values(NODES)
-      .filter(n=>n.gen===0 && !n.isSelf && n.spouseId)
-      .map(n=>n.id)
-  );
-  const bloodIds   = [selfNode.id, ...sibIds.filter(id=>!sibsWithSpouse.has(id))];
-  const bloodNodes = bloodIds.map(id=>NODES[id]).filter(Boolean);
-  const SIB_PIL = new Set(["Sister's Father-in-law","Sister's Mother-in-law",
-                            "Brother's Father-in-law","Brother's Mother-in-law"]);
-  const TRUE_PARENT_RELS = new Set([
-    'Father','Mother','Stepfather','Stepmother'
-  ]);
-  const parentNodes= Object.values(NODES).filter(
-    n=>n.gen===-1 && TRUE_PARENT_RELS.has(n.relation) && !SIB_PIL.has(n.relation)
-  );
-  const parentCol  = gc(-1);
-
-  // Partition parent nodes into coupled vs single
-  const parentCoupleHandled = new Set();
-  // Exclude SIB_PIL couples (MallaReddy+rajamma) — they connect to BIL, not to Kavitha
-  const parentGenCouples = ancestorCouples.filter(ac=>ac.gen===-1 && !ac.isSibPil);
-
-  for(const ac of parentGenCouples){{
-    const pa=NODES[ac.nid_a], pb=NODES[ac.nid_b];
-    if(!pa||!pb) continue;
-    parentCoupleHandled.add(ac.nid_a); parentCoupleHandled.add(ac.nid_b);
-    const unionX = (pa.x + pb.x) / 2;
-    const unionY = pa.y;
-    const stemY = unionY + NH/2;
-
-    if(bloodNodes.length === 1){{
-      // Sirf ek child — seedha elbow: couple midpoint se child tak
-      // Isse unionX aur child.x ka gap cover hota hai
-      const child = bloodNodes[0];
-      elbow(unionX, stemY, child.x, child.y - NH/2, parentCol+'99');
-    }} else if(bloodNodes.length > 1){{
-      // Multiple children — T-bar
-      const bxs  = bloodNodes.map(n=>n.x);
-      const barX1= Math.min(...bxs), barX2=Math.max(...bxs);
-      const barY  = (stemY + bloodNodes[0].y - NH/2) / 2;
-      const midBar = (barX1+barX2)/2;
-
-      // Stem from unionX down to barY, then elbow to midBar if needed
-      elbow(unionX, stemY, midBar, barY, parentCol+'99');
-
-      // Horizontal bar
-      const hBar=svgEl('line');
-      hBar.setAttribute('x1',barX1); hBar.setAttribute('y1',barY);
-      hBar.setAttribute('x2',barX2); hBar.setAttribute('y2',barY);
-      hBar.setAttribute('stroke',parentCol+'99'); hBar.setAttribute('stroke-width','1.8');
-      svg.appendChild(hBar);
-
-      // Drop to each child
-      for(const c of bloodNodes){{
-        const dl=svgEl('line');
-        dl.setAttribute('x1',c.x); dl.setAttribute('y1',barY);
-        dl.setAttribute('x2',c.x); dl.setAttribute('y2',c.y-NH/2);
-        dl.setAttribute('stroke',parentCol+'99'); dl.setAttribute('stroke-width','1.8');
-        svg.appendChild(dl);
-      }}
-    }}
-  }}
-
-  // Fallback: any unpaired parent nodes use the old shared-bar approach
-  const unpairedParents = parentNodes.filter(n=>!parentCoupleHandled.has(n.id));
-  if(unpairedParents.length && bloodNodes.length){{
-    if(bloodNodes.length === 1){{
-      // Sirf ek child (You, koi sibling nahi) — seedha parent se child tak line
-      for(const par of unpairedParents){{
-        elbow(par.x, par.y+NH/2, bloodNodes[0].x, bloodNodes[0].y-NH/2, parentCol+'99');
-      }}
-    }} else {{
-      // Multiple children — T-bar approach
-      const parBottomY = unpairedParents[0].y + NH/2;
-      const bloodTopY  = bloodNodes[0].y  - NH/2;
-      const barY = (parBottomY + bloodTopY) / 2;
-
-      const bxs  = bloodNodes.map(n=>n.x);
-      const barX1= Math.min(...bxs), barX2=Math.max(...bxs);
-
-      const hBar=svgEl('line');
-      hBar.setAttribute('x1',barX1); hBar.setAttribute('y1',barY);
-      hBar.setAttribute('x2',barX2); hBar.setAttribute('y2',barY);
-      hBar.setAttribute('stroke',parentCol+'99'); hBar.setAttribute('stroke-width','1.8');
-      svg.appendChild(hBar);
-
-      for(const c of bloodNodes){{
-        const dl=svgEl('line');
-        dl.setAttribute('x1',c.x); dl.setAttribute('y1',barY);
-        dl.setAttribute('x2',c.x); dl.setAttribute('y2',c.y-NH/2);
-        dl.setAttribute('stroke',parentCol+'99'); dl.setAttribute('stroke-width','1.8');
-        svg.appendChild(dl);
-      }}
-
-      for(const par of unpairedParents){{
-        const px=par.x, py=par.y+NH/2;
-        const midBar=(barX1+barX2)/2;
-        elbow(px, py, midBar, barY, parentCol+'99');
-      }}
-    }}
-  }}
-
-  // ── 3b. Parents also connect down to each married sibling (blood child) ──────
-  // e.g. Father+Mother → Sister (even though Sister has a spouse/BIL)
-  const sibCoupleTargets = sibIds.filter(id=>sibsWithSpouse.has(id))
-    .map(id=>NODES[id]).filter(Boolean);
-  if(sibCoupleTargets.length && parentGenCouples.length){{
-    const ac0 = parentGenCouples[0];
-    const pa=NODES[ac0.nid_a], pb=NODES[ac0.nid_b];
-    if(pa && pb){{
-      const unionX=(pa.x+pb.x)/2, unionY=pa.y;
-      for(const sib of sibCoupleTargets){{
-        elbow(unionX, unionY+NH/2, sib.x, sib.y-NH/2, parentCol+'99');
-      }}
-    }}
-  }} else if(sibCoupleTargets.length && bloodNodes.length===1){{
-    // No detected couple but we have a single parent — elbow to each married sib
-    const singlePars = parentNodes.filter(n=>!parentCoupleHandled.has(n.id));
-    for(const par of singlePars){{
-      for(const sib of sibCoupleTargets){{
-        elbow(par.x, par.y+NH/2, sib.x, sib.y-NH/2, parentCol+'99');
-      }}
-    }}
-  }}
-
-  // ── 4 & 5. Ancestors gen ≤ -2 ─────────────────────────────────────────────
-  //
-  // Coupled pairs: stem drops from couple midpoint to their SPECIFIC blood child
-  //   (stored as ac.child_nid). Falls back to nearest-by-distance only if
-  //   child_nid is null or not found.
-  // Unpaired singles: each connects independently to their nearest gen+1 node.
-  //
-  const ancestorHandled = new Set();
-
-  // Process couples first
-  for(const ac of ancestorCouples){{
-    if(ac.gen >= -1) continue;   // gen -2 and below only here
-    const pa=NODES[ac.nid_a], pb=NODES[ac.nid_b];
-    if(!pa||!pb) continue;
-    ancestorHandled.add(ac.nid_a); ancestorHandled.add(ac.nid_b);
-
-    const unionX = (pa.x + pb.x) / 2;
-    const unionY = pa.y;
-    const adjGen = ac.gen + 1;
-    const adjNodes = Object.values(NODES).filter(p=>p.gen===adjGen);
-    if(!adjNodes.length) continue;
-
-    // Connect the grandparent couple to EVERY proven child in the
-    // next generation. This is the actual family graph: Father, Uncle,
-    // Aunt, etc. are siblings because they all have a parent edge to the
-    // same grandparent couple. Never infer this from relation-name buckets.
-    const provenChildIds = Array.isArray(ac.child_nids)
-      ? ac.child_nids.filter(id => NODES[id])
-      : [];
-    if(provenChildIds.length){{
-      for(const child of provenChildIds){{
-        elbow(
-          unionX, unionY+NH/2,
-          child.x, child.y-NH/2,
-          gc(ac.gen)+'bb'
-        );
-      }}
-    }} else {{
-      // Backward-compatible fallback for older metadata.
-      const target = (ac.child_nid && NODES[ac.child_nid])
-        ? NODES[ac.child_nid]
-        : adjNodes.reduce((a,b)=>
-            Math.abs(a.x-unionX) <= Math.abs(b.x-unionX) ? a : b
-          );
-      elbow(unionX, unionY+NH/2, target.x, target.y-NH/2, gc(ac.gen)+'bb');
-    }}
-  }}
-
-  // Process unpaired ancestor singles
-  // Use relation-based targeting so e.g. a lone Maternal Grandfather
-  // always connects to Mother (not nearest node by X which could be Father).
-  const SINGLE_ANCESTOR_TARGET = {{
-    'Maternal Grandfather': new Set(['Mother','Stepmother']),
-    'Maternal Grandmother': new Set(['Mother','Stepmother']),
-    'Paternal Grandfather': new Set(['Father','Stepfather']),
-    'Paternal Grandmother': new Set(['Father','Stepfather']),
-    'Great-grandfather':    new Set(['Paternal Grandfather','Maternal Grandfather',
-                                     'Paternal Grandmother','Maternal Grandmother']),
-    'Great-grandmother':    new Set(['Paternal Grandfather','Maternal Grandfather',
-                                     'Paternal Grandmother','Maternal Grandmother']),
-  }};
-  for(const [id,n] of Object.entries(NODES)){{
-    if(n.gen>=-1) continue;
-    if(ancestorHandled.has(id)) continue;
-    const adjGen = n.gen + 1;
-    const adjNodes = Object.values(NODES).filter(p=>p.gen===adjGen);
-    if(!adjNodes.length) continue;
-    // Use actual database parent-child edges. Never restrict a
-    // grandparent to Father/Mother by relation-name alone.
-    const provenTargets = adjNodes.filter(p => {{
-      const a = n.uid + '->' + p.uid;
-      const b = p.uid + '->' + n.uid;
-      return n.uid && p.uid && (PARENT_EDGES.has(a) || PARENT_EDGES.has(b));
-    }});
-
-    if(provenTargets.length){{
-      for(const target of provenTargets){{
-        elbow(
-          n.x, n.y+NH/2,
-          target.x, target.y-NH/2,
-          gc(n.gen)+'bb'
-        );
-      }}
-    }} else {{
-      const target = adjNodes.reduce((a,b)=>
-        Math.abs(a.x-n.x) <= Math.abs(b.x-n.x) ? a : b
-      );
-      elbow(n.x, n.y+NH/2, target.x, target.y-NH/2, gc(n.gen)+'bb');
-    }}
-  }}
-
-  // ── 5b. Sister's/Brother's parents-in-law → connect down to BIL/Sister-in-law ──
-  // If they are a couple (spouseId set), draw from their midpoint.
-  // Otherwise draw individual elbows.
-  const SIB_PIL_TARGET = {{
-    "Sister's Father-in-law":  new Set(["Brother-in-law","Wife's Sister's Husband"]),
-    "Sister's Mother-in-law":  new Set(["Brother-in-law","Wife's Sister's Husband"]),
-    "Brother's Father-in-law": new Set(["Husband's Sister","Brother's Wife"]),
-    "Brother's Mother-in-law": new Set(["Husband's Sister","Brother's Wife"]),
-  }};
-  // Draw SIB_PIL edges using ancestorCouples entries tagged isSibPil=true
-  const sibPilCouples = ancestorCouples.filter(ac=>ac.isSibPil);
-  const sibPilHandled = new Set();
-  for(const ac of sibPilCouples){{
-    const pa=NODES[ac.nid_a], pb=NODES[ac.nid_b];
-    const target = ac.child_nid ? NODES[ac.child_nid] : null;
-    if(!target) continue;
-    const col = gc(-1)+'bb';
-    if(pa && pb){{
-      // Couple → stem from midpoint down to BIL
-      sibPilHandled.add(ac.nid_a); sibPilHandled.add(ac.nid_b);
-      const midX = (pa.x + pb.x) / 2;
-      const stemY = pa.y + NH/2;
-      const barY  = (stemY + target.y - NH/2) / 2;
-      const vs=svgEl('line');
-      vs.setAttribute('x1',midX); vs.setAttribute('y1',stemY);
-      vs.setAttribute('x2',midX); vs.setAttribute('y2',barY);
-      vs.setAttribute('stroke',col); vs.setAttribute('stroke-width','1.8');
-      svg.appendChild(vs);
-      elbow(midX, barY, target.x, target.y-NH/2, col);
-    }}
-  }}
-  // Any single (unpaired) SIB_PIL nodes
-  for(const [id,n] of Object.entries(NODES)){{
-    if(!SIB_PIL.has(n.relation)) continue;
-    if(sibPilHandled.has(id)) continue;
-    const col = gc(-1)+'bb';
-    const targetRels = SIB_PIL_TARGET[n.relation];
-    const gen0Nodes = Object.values(NODES).filter(p=>p.gen===0);
-    const target = gen0Nodes.find(p=>targetRels && targetRels.has(p.relation)) || null;
-    if(!target) continue;
-    sibPilHandled.add(id);
-    elbow(n.x, n.y+NH/2, target.x, target.y-NH/2, col);
-  }}
-
-  // ── 6. Descendants gen ≥ 2 ────────────────────────────────────────────────
-  for(const [id,n] of Object.entries(NODES)){{
-    if(n.gen<2) continue;
-    const adj=Object.values(NODES).filter(p=>p.gen===n.gen-1);
-    if(!adj.length) continue;
-    const par=adj.reduce((a,b)=>Math.abs(a.x-n.x)<Math.abs(b.x-n.x)?a:b);
-    elbow(par.x, par.y+NH/2, n.x, n.y-NH/2, gc(n.gen)+'99');
-    relLabel(n.x, n.y-NH/2-22, (n.relation||'').trim(), gc(n.gen));
-  }}
-}}
-
-// ── Generation row labels — fixed to viewport left, not world coords ──────────
-function drawGenLabels(){{
-  // Clean up any previously appended label divs
-  if(window._genLabelData) window._genLabelData.forEach(item=>item.div.remove());
-  window._genLabelData=[];
-  const gens=[...new Set(Object.values(NODES).map(n=>n.gen))].sort((a,b)=>a-b);
-  gens.forEach(g=>{{
-    const rowNodes=Object.values(NODES).filter(n=>n.gen===g);
-    const worldY=rowNodes[0].y; // center Y of this gen row in world coords
-    const div=document.createElement('div');
-    div.className='gen-label';
-    div.style.left='8px';
-    div.style.position='absolute';  // inside #viewport, not body
-    div.style.zIndex='10';
-    div.style.pointerEvents='none';
-    div.textContent=GEN_LABEL[String(g)]||('Gen '+g);
-    div.style.color=gc(g);
-    viewport.appendChild(div); // attach to viewport so coords are viewport-relative
-    window._genLabelData.push({{div, worldY}});
-  }});
-  updateGenLabelPositions();
-}}
-
-function updateGenLabelPositions(){{
-  if(!window._genLabelData) return;
-  const vph=viewport.clientHeight||660;
-  window._genLabelData.forEach(item=>{{
-    const screenY = item.worldY * scale + ty;
-    item.div.style.top = screenY + 'px';
-    item.div.style.display=(screenY>10&&screenY<vph-20)?'block':'none';
-  }});
-}}
-
-// ── Legend & info bar ─────────────────────────────────────────────────────────
-function buildLegend(){{
-  const present=[...new Set(Object.values(NODES).map(n=>String(n.gen)))].sort((a,b)=>+a-+b);
-  document.getElementById('legend').innerHTML=present.map(g=>
-    `<div class="lg-row"><div class="lg-dot" style="background:${{gc(+g)}}"></div>${{GEN_LABEL[g]||'Gen '+g}}</div>`
-  ).join('');
-}}
-function buildInfo(){{
-  const tot=Object.keys(NODES).length;
-  const gens=new Set(Object.values(NODES).map(n=>n.gen)).size;
-  document.getElementById('info-bar').textContent=`🌳 ${{tot}} member${{tot!==1?'s':''}} · ${{gens}} generation${{gens!==1?'s':''}} · Drag to pan · Scroll to zoom`;
-}}
-
-// ── Tooltip ──────────────────────────────────────────────────────────────────
-function showTip(n,e){{
-  let html='';
-  if(n.relation) html+=`<div class="tt-rel">${{n.relation}}</div>`;
-  html+=`<div class="tt-name">${{n.label}}</div>`;
-  if(n.dynasty) html+=`<div class="tt-row">🏰 ${{n.dynasty}}</div>`;
-  if(n.age)     html+=`<div class="tt-row">🎂 Age ${{n.age}}</div>`;
-  if(n.occupation) html+=`<div class="tt-row">💼 ${{n.occupation}}</div>`;
-  if(n.city)    html+=`<div class="tt-row">🏙️ ${{n.city}}</div>`;
-  if(n.verified&&!n.isSelf) html+=`<span class="tt-badge tt-v">✓ Verified</span>`;
-  if(n.isSelf)  html+=`<span class="tt-badge tt-s">★ You</span>`;
-  tip.innerHTML=html;tip.style.display='block';
-  moveTip(e);
-}}
-function moveTip(e){{
-  tip.style.left=(e.clientX+14)+'px';tip.style.top=(e.clientY-8)+'px';
-}}
-function hideTip(){{tip.style.display='none';}}
-
-// ── Pan & zoom ────────────────────────────────────────────────────────────────
-function applyTransform(){{
-  world.style.transform=`translate(${{tx}}px,${{ty}}px) scale(${{scale}})`;
-  updateGenLabelPositions();
-}}
-viewport.addEventListener('mousedown',e=>{{dragging=true;lastX=e.clientX;lastY=e.clientY;viewport.classList.add('dragging');}});
-window.addEventListener('mouseup',()=>{{dragging=false;viewport.classList.remove('dragging');}});
-window.addEventListener('mousemove',e=>{{
-  if(!dragging) return;
-  tx+=e.clientX-lastX;ty+=e.clientY-lastY;
-  lastX=e.clientX;lastY=e.clientY;applyTransform();
-}});
-viewport.addEventListener('wheel',e=>{{
-  e.preventDefault();
-  const factor=e.deltaY>0?.88:1.14;
-  const rect=viewport.getBoundingClientRect();
-  const ox=e.clientX-rect.left,oy=e.clientY-rect.top;
-  tx=ox+(tx-ox)*factor;ty=oy+(ty-oy)*factor;
-  scale=Math.max(.15,Math.min(4,scale*factor));
-  applyTransform();
-}},{{passive:false}});
-
-// Touch support
-let lastDist=0;
-viewport.addEventListener('touchstart',e=>{{
-  if(e.touches.length===1){{dragging=true;lastX=e.touches[0].clientX;lastY=e.touches[0].clientY;}}
-  else if(e.touches.length===2) lastDist=Math.hypot(e.touches[0].clientX-e.touches[1].clientX,e.touches[0].clientY-e.touches[1].clientY);
-}},{{passive:true}});
-viewport.addEventListener('touchmove',e=>{{
-  e.preventDefault();
-  if(e.touches.length===1&&dragging){{
-    tx+=e.touches[0].clientX-lastX;ty+=e.touches[0].clientY-lastY;
-    lastX=e.touches[0].clientX;lastY=e.touches[0].clientY;applyTransform();
-  }}else if(e.touches.length===2){{
-    const d=Math.hypot(e.touches[0].clientX-e.touches[1].clientX,e.touches[0].clientY-e.touches[1].clientY);
-    scale=Math.max(.15,Math.min(4,scale*(d/lastDist)));lastDist=d;applyTransform();
-  }}
-}},{{passive:false}});
-viewport.addEventListener('touchend',()=>{{dragging=false;}},{{passive:true}});
-
-function zoomIn(){{scale=Math.min(4,scale*1.2);applyTransform();}}
-function zoomOut(){{scale=Math.max(.15,scale/1.2);applyTransform();}}
-function resetView(){{
-  const vw=viewport.clientWidth||900, vh=viewport.clientHeight||660;
-  // Compute bounding box of all nodes in world coords
-  const xs=Object.values(NODES).map(n=>n.x);
-  const ys=Object.values(NODES).map(n=>n.y);
-  const minX=Math.min(...xs)-NW/2, maxX=Math.max(...xs)+NW/2;
-  const minY=Math.min(...ys)-NH/2, maxY=Math.max(...ys)+NH/2;
-  const contentW=maxX-minX, contentH=maxY-minY;
-  // Fit scale so content fills ~80% of viewport
-  const fitScale=Math.min(0.9*vw/contentW, 0.82*vh/contentH, INIT_SCALE);
-  scale=fitScale;
-  // Centre the content
-  tx = vw/2 - (minX + contentW/2)*scale;
-  ty = vh/2 - (minY + contentH/2)*scale;
-  applyTransform();
-}}
-
-// ── Boot ──────────────────────────────────────────────────────────────────────
-drawEdges();
-buildLegend();
-buildInfo();
-
-// resetView needs real viewport dimensions. Inside a Streamlit tab the iframe
-// is hidden (display:none or zero-size) until the user clicks the tab, so
-// requestAnimationFrame fires when clientWidth/clientHeight are still 0 and
-// the tree ends up invisible. Use ResizeObserver + staggered setTimeouts to
-// re-run resetView the first time the viewport actually has a non-zero size.
-let _booted = false;
-function _boot() {{
-  if (_booted) return;
-  const vw = viewport.clientWidth, vh = viewport.clientHeight;
-  if (vw > 0 && vh > 0) {{
-    _booted = true;
-    resetView();
-    drawGenLabels();
-  }}
-}}
-// Try immediately in case the tab is already visible
-requestAnimationFrame(_boot);
-// Staggered fallbacks for browsers that don't fire ResizeObserver reliably
-// when a hidden Streamlit tab becomes visible
-setTimeout(_boot, 500);
-setTimeout(_boot, 1200);
-setTimeout(_boot, 2500);
-// Also watch for when the element is resized into view (tab click)
-if (typeof ResizeObserver !== 'undefined') {{
-  const ro = new ResizeObserver(() => {{
-    _boot();
-    if (_booted) ro.disconnect();
-  }});
-  ro.observe(viewport);
-}}
-</script></body></html>"""
-
-    st.components.v1.html(tree_html, height=660, scrolling=False)
-    st.markdown("""<div style="font-size:.76rem;color:var(--mist);text-align:center;margin-top:.3rem;">
-    🖱️ <strong>Drag</strong> to pan &nbsp;·&nbsp; <strong>Scroll/Pinch</strong> to zoom &nbsp;·&nbsp;
-    <strong>Hover</strong> nodes for details
-    </div>""", unsafe_allow_html=True)
-
-# ══════════════════════════════════════════════════════════════════════════════
-# DYNASTY SEARCH
-# ══════════════════════════════════════════════════════════════════════════════
 def _dynasty_search_tab(uid):
     if st.session_state.viewed_profile:
         vp      = st.session_state.viewed_profile
