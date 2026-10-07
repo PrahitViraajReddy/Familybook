@@ -2126,15 +2126,54 @@ def _build_tree_data(uid):
         units.extend(singles)
         units.sort(key=unit_sort_key)
 
-        total_w = sum(unit_width(x) for x in units) + max(0, len(units) - 1) * H_GAP
-        cx = -(total_w / 2) + NODE_W / 2
+        # Parent generation contains two different structural groups:
+        #   1) true ancestors of the current user (Father/Mother)
+        #   2) Father's/Mother's siblings and their spouses.
+        # Keep the second group on the same generation row but outside the
+        # parent union so they can be connected as side relatives in the SVG.
+        SIDE_RELATIONS = {
+            "Paternal Uncle", "Elder Paternal Uncle", "Paternal Aunt",
+            "Paternal Aunt's Husband", "Paternal Uncle's Wife",
+            "Maternal Uncle", "Maternal Aunt",
+            "Maternal Uncle's Wife", "Maternal Aunt's Husband",
+        }
 
-        for unit in units:
+        def is_side_unit(unit):
+            return any(nodes[nid].get("relation") in SIDE_RELATIONS for nid in unit)
+
+        side_units = [unit for unit in units if is_side_unit(unit)]
+        main_units = [unit for unit in units if not is_side_unit(unit)]
+
+        # Lay the actual parent family centrally.
+        main_total_w = (
+            sum(unit_width(x) for x in main_units)
+            + max(0, len(main_units) - 1) * H_GAP
+        )
+        cx = -(main_total_w / 2) + NODE_W / 2
+        for unit in main_units:
             for j, nid in enumerate(unit):
                 nodes[nid]["x"] = cx + j * (NODE_W + COUPLE_GAP)
                 nodes[nid]["y"] = y
                 placed.add(nid)
             cx += unit_width(unit) + H_GAP
+
+        # Put parent-side relatives alternately outside the central parent
+        # family. Their relationship is drawn separately by the JS edge layer.
+        left_x = -(main_total_w / 2) - FAMILY_GAP - NODE_W / 2
+        right_x = (main_total_w / 2) + FAMILY_GAP + NODE_W / 2
+        left_count = right_count = 0
+        for idx, unit in enumerate(side_units):
+            uw = unit_width(unit)
+            if idx % 2 == 0:
+                x0 = left_x - uw / 2 + NODE_W / 2
+                left_x -= uw + FAMILY_GAP
+            else:
+                x0 = right_x - uw / 2 + NODE_W / 2
+                right_x += uw + FAMILY_GAP
+            for j, nid in enumerate(unit):
+                nodes[nid]["x"] = x0 + j * (NODE_W + COUPLE_GAP)
+                nodes[nid]["y"] = y
+                placed.add(nid)
 
     # ── PASS 4: Descendant rows +2/+3 ─────────────────────────────────────────
     for gen, nids in by_gen.items():
@@ -2566,6 +2605,65 @@ function drawEdges(){{
       for(const sib of sibCoupleTargets){{
         elbow(par.x, par.y+NH/2, sib.x, sib.y-NH/2, parentCol+'99');
       }}
+    }}
+  }}
+
+  // ── 3c. Parent-side relatives ──────────────────────────────────────────
+  // Father's siblings belong to the paternal side; Mother's siblings belong
+  // to the maternal side. They are NOT additional parents of the current user.
+  const SIDE_TO_PARENT = {
+    'Paternal Uncle': new Set(['Father','Stepfather']),
+    'Elder Paternal Uncle': new Set(['Father','Stepfather']),
+    'Paternal Aunt': new Set(['Father','Stepfather']),
+    "Paternal Aunt's Husband": new Set(['Father','Stepfather']),
+    "Paternal Uncle's Wife": new Set(['Father','Stepfather']),
+    'Maternal Uncle': new Set(['Mother','Stepmother']),
+    'Maternal Aunt': new Set(['Mother','Stepmother']),
+    "Maternal Uncle's Wife": new Set(['Mother','Stepmother']),
+    "Maternal Aunt's Husband": new Set(['Mother','Stepmother'])
+  };
+  const sideNodes = Object.values(NODES).filter(
+    n => n.gen===-1 && SIDE_TO_PARENT[n.relation]
+  );
+  const sideDone = new Set();
+
+  for(const side of sideNodes){{
+    if(sideDone.has(side.id)) continue;
+
+    const target = Object.values(NODES).find(
+      p => p.gen===-1 && SIDE_TO_PARENT[side.relation].has(p.relation)
+    );
+    if(!target) continue;
+
+    // If the side relative is married, draw the connector from the family
+    // unit midpoint so the uncle/aunt and spouse remain one visual unit.
+    let unitX = side.x;
+    let unitRight = side.x;
+    if(side.spouseId && NODES[side.spouseId]){{
+      const sp=NODES[side.spouseId];
+      unitX=(side.x+sp.x)/2;
+      unitRight=Math.max(side.x,sp.x);
+      sideDone.add(sp.id);
+    }}
+    sideDone.add(side.id);
+
+    const yBar = side.y + NH/2 + 24;
+    const targetX = target.x;
+    const minX = Math.min(targetX, unitX);
+    const maxX = Math.max(targetX, unitX);
+
+    const h=svgEl('line');
+    h.setAttribute('x1',minX); h.setAttribute('y1',yBar);
+    h.setAttribute('x2',maxX); h.setAttribute('y2',yBar);
+    h.setAttribute('stroke',parentCol+'66'); h.setAttribute('stroke-width','1.6');
+    svg.appendChild(h);
+
+    for(const x of [targetX, unitX]){{
+      const v=svgEl('line');
+      v.setAttribute('x1',x); v.setAttribute('y1',target.y+NH/2);
+      v.setAttribute('x2',x); v.setAttribute('y2',yBar);
+      v.setAttribute('stroke',parentCol+'66'); v.setAttribute('stroke-width','1.6');
+      svg.appendChild(v);
     }}
   }}
 
