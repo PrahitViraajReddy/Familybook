@@ -2235,6 +2235,7 @@ def _family_tree_tab(uid):
         "Maternal Aunt": {"Mother", "Stepmother"},
     }
     side_edges = []
+    node_h = 90  # Must match NODE_H used by _build_tree_data()
     for nid, n in nodes.items():
         rel = n.get("relation")
         if rel not in side_parent_map:
@@ -2251,11 +2252,11 @@ def _family_tree_tab(uid):
             continue
         spouse = nodes.get(n.get("spouseId")) if n.get("spouseId") else None
         family_x = (n["x"] + spouse["x"]) / 2 if spouse else n["x"]
-        branch_y = n["y"] + NODE_H / 2 + 24
+        branch_y = n["y"] + node_h / 2 + 24
         side_edges.append(
-            f'<path d="M {family_x:.1f} {n["y"] + NODE_H / 2:.1f} '
+            f'<path d="M {family_x:.1f} {n["y"] + node_h / 2:.1f} '
             f'V {branch_y:.1f} H {target["x"]:.1f} '
-            f'V {target["y"] + NODE_H / 2:.1f}" '
+            f'V {target["y"] + node_h / 2:.1f}" '
             f'stroke="#2563EB99" stroke-width="1.8" fill="none" '
             f'stroke-linejoin="round"/>'
         )
