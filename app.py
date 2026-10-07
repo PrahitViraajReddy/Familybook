@@ -2611,19 +2611,19 @@ function drawEdges(){{
   // ── 3c. Parent-side relatives ──────────────────────────────────────────
   // Father's siblings belong to the paternal side; Mother's siblings belong
   // to the maternal side. They are NOT additional parents of the current user.
-  const SIDE_TO_PARENT = {{
-    'Paternal Uncle': new Set(['Father','Stepfather']),
-    'Elder Paternal Uncle': new Set(['Father','Stepfather']),
-    'Paternal Aunt': new Set(['Father','Stepfather']),
-    "Paternal Aunt's Husband": new Set(['Father','Stepfather']),
-    "Paternal Uncle's Wife": new Set(['Father','Stepfather']),
-    'Maternal Uncle': new Set(['Mother','Stepmother']),
-    'Maternal Aunt': new Set(['Mother','Stepmother']),
-    "Maternal Uncle's Wife": new Set(['Mother','Stepmother']),
-    "Maternal Aunt's Husband": new Set(['Mother','Stepmother'])
-  }};
+  const SIDE_TO_PARENT = new Map([
+    ['Paternal Uncle', ['Father','Stepfather']],
+    ['Elder Paternal Uncle', ['Father','Stepfather']],
+    ['Paternal Aunt', ['Father','Stepfather']],
+    ["Paternal Aunt's Husband", ['Father','Stepfather']],
+    ["Paternal Uncle's Wife", ['Father','Stepfather']],
+    ['Maternal Uncle', ['Mother','Stepmother']],
+    ['Maternal Aunt', ['Mother','Stepmother']],
+    ["Maternal Uncle's Wife", ['Mother','Stepmother']],
+    ["Maternal Aunt's Husband", ['Mother','Stepmother']]
+  ]);
   const sideNodes = Object.values(NODES).filter(
-    n => n.gen===-1 && SIDE_TO_PARENT[n.relation]
+    n => n.gen===-1 && SIDE_TO_PARENT.has(n.relation)
   );
   const sideDone = new Set();
 
@@ -2631,7 +2631,7 @@ function drawEdges(){{
     if(sideDone.has(side.id)) continue;
 
     const target = Object.values(NODES).find(
-      p => p.gen===-1 && SIDE_TO_PARENT[side.relation].has(p.relation)
+      p => p.gen===-1 && SIDE_TO_PARENT.get(side.relation).includes(p.relation)
     );
     if(!target) continue;
 
