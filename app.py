@@ -2611,7 +2611,7 @@ function drawEdges(){{
   // ── 3c. Parent-side relatives ──────────────────────────────────────────
   // Father's siblings belong to the paternal side; Mother's siblings belong
   // to the maternal side. They are NOT additional parents of the current user.
-  const SIDE_TO_PARENT = {
+  const SIDE_TO_PARENT = {{
     'Paternal Uncle': new Set(['Father','Stepfather']),
     'Elder Paternal Uncle': new Set(['Father','Stepfather']),
     'Paternal Aunt': new Set(['Father','Stepfather']),
@@ -2621,7 +2621,7 @@ function drawEdges(){{
     'Maternal Aunt': new Set(['Mother','Stepmother']),
     "Maternal Uncle's Wife": new Set(['Mother','Stepmother']),
     "Maternal Aunt's Husband": new Set(['Mother','Stepmother'])
-  };
+  }};
   const sideNodes = Object.values(NODES).filter(
     n => n.gen===-1 && SIDE_TO_PARENT[n.relation]
   );
