@@ -2936,8 +2936,8 @@ def _album_detail_view(uid, dynasty):
         if st.button("← Albums", key="back_to_albums"):
             st.session_state.current_album_id = None; st.rerun()
     with col_title:
-        st.markdown(f'<div style="font-family:\'Cormorant Garamond\',serif;font-size:1.4rem;font-weight:700;color:var(--bark);">{alb["title"]}</div>', unsafe_allow_html=True)
-        st.markdown(f'<div style="font-size:.76rem;color:var(--mist);">{alb.get("description","")}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div style="font-family:\'Cormorant Garamond\',serif;font-size:1.4rem;font-weight:700;color:var(--bark);">{_esc(alb["title"])}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div style="font-size:.76rem;color:var(--mist);">{_esc(alb.get("description",""))}</div>', unsafe_allow_html=True)
     with col_acts:
         vw_col1, vw_col2, vw_col3 = st.columns(3)
         with vw_col1:
@@ -3018,16 +3018,16 @@ def _album_detail_view(uid, dynasty):
         st.markdown(f'<div style="text-align:center;font-size:.78rem;color:var(--mist);">Photo {idx+1} of {len(media)}</div>', unsafe_allow_html=True)
         st.image(m["media_data"], use_container_width=True)
         if m.get("caption"):
-            st.markdown(f'<div style="text-align:center;font-size:.9rem;color:var(--ink);margin:.4rem 0;">{m["caption"]}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div style="text-align:center;font-size:.9rem;color:var(--ink);margin:.4rem 0;">{_esc(m["caption"])}</div>', unsafe_allow_html=True)
         if m.get("location"):
-            st.markdown(f'<div style="text-align:center;font-size:.76rem;color:var(--mist);">📍 {m["location"]}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div style="text-align:center;font-size:.76rem;color:var(--mist);">📍 {_esc(m["location"])}</div>', unsafe_allow_html=True)
         nav1, nav2, nav3 = st.columns([1, 2, 1])
         with nav1:
             if st.button("◀ Prev", use_container_width=True, key="slide_prev"):
                 st.session_state.slideshow_idx = (idx - 1) % len(media); st.rerun()
         with nav2:
             if m.get("taken_on"):
-                st.markdown(f'<div style="text-align:center;font-size:.76rem;color:var(--mist);">📅 {m["taken_on"]}</div>', unsafe_allow_html=True)
+                st.markdown(f'<div style="text-align:center;font-size:.76rem;color:var(--mist);">📅 {_esc(m["taken_on"])}</div>', unsafe_allow_html=True)
         with nav3:
             if st.button("Next ▶", use_container_width=True, key="slide_next"):
                 st.session_state.slideshow_idx = (idx + 1) % len(media); st.rerun()
@@ -3147,11 +3147,11 @@ def _family_diary_tab(uid):
         mood_str = f'<span class="diary-mood">{entry["mood"]}</span>' if entry.get("mood") else ""
         st.markdown(f"""
         <div class="diary-date">{ensure_dob(entry['entry_date']).strftime('%A, %d %B %Y')}</div>
-        <div style="font-family:'Cormorant Garamond',serif;font-size:1.8rem;font-weight:700;color:var(--bark);">{mood_str}{entry['title']}</div>
+        <div style="font-family:'Cormorant Garamond',serif;font-size:1.8rem;font-weight:700;color:var(--bark);">{mood_str}{_esc(entry['title'])}</div>
         """, unsafe_allow_html=True)
         if entry.get("tags"):
             for t in entry["tags"].split(","):
-                if t.strip(): st.markdown(f'<span class="badge badge-blue"># {t.strip()}</span>', unsafe_allow_html=True)
+                if t.strip(): st.markdown(f'<span class="badge badge-blue"># {_esc(t.strip())}</span>', unsafe_allow_html=True)
         st.markdown('<hr class="fancy-divider">', unsafe_allow_html=True)
         st.markdown(f'<div class="diary-full-content">{_esc(entry["content"])}</div>', unsafe_allow_html=True)
         st.markdown(f'<div style="font-size:.72rem;color:var(--mist);margin-top:1rem;">{"🔒 Private" if entry["privacy"]=="private" else "🏰 Dynasty"} · {"Draft" if entry["is_draft"] else "Published"}</div>', unsafe_allow_html=True)
@@ -3197,7 +3197,7 @@ def _family_diary_tab(uid):
 
         tags_html = (
             '<div style="margin-top:.35rem;">'
-            + "".join(f'<span class="badge badge-blue"># {t.strip()}</span>' for t in e["tags"].split(",") if t.strip())
+            + "".join(f'<span class="badge badge-blue"># {_esc(t.strip())}</span>' for t in e["tags"].split(",") if t.strip())
             + '</div>'
         ) if e.get("tags") else ""
         st.markdown(f"""
@@ -3334,9 +3334,9 @@ def _family_timeline_tab(uid, dynasty):
                             <div style="font-size:.7rem;color:var(--mist);">by {ev.get('creator_name','')}</div>
                         </div>
                     </div>
-                    {f'<div class="tl-desc">{ev["description"]}</div>' if ev.get("description") else ""}
-                    {f'<div class="tl-loc">📍 {ev["location"]}</div>' if ev.get("location") else ""}
-                    {f'<div style="margin-top:.4rem;">' + "".join(f'<span class="badge badge-blue"># {t.strip()}</span>' for t in ev["tags"].split(",") if t.strip()) + '</div>' if ev.get("tags") else ""}
+                    {f'<div class="tl-desc">{_esc(ev["description"])}</div>' if ev.get("description") else ""}
+                    {f'<div class="tl-loc">📍 {_esc(ev["location"])}</div>' if ev.get("location") else ""}
+                    {f'<div style="margin-top:.4rem;">' + "".join(f'<span class="badge badge-blue"># {_esc(t.strip())}</span>' for t in ev["tags"].split(",") if t.strip()) + '</div>' if ev.get("tags") else ""}
                 </div>
             </div>""", unsafe_allow_html=True)
 
@@ -3400,9 +3400,9 @@ def _family_links_tab(uid):
                     with c1:
                         st.markdown(
                             f'<div class="rel-chip">{mini_av}'
-                            f'<span class="rel-type">{display_rel}</span>'
-                            f'<span>{name}</span>'
-                            f'<span style="color:var(--mist);font-size:.78rem;">{dynasty}</span>'
+                            f'<span class="rel-type">{_esc(display_rel)}</span>'
+                            f'<span>{_esc(name)}</span>'
+                            f'<span style="color:var(--mist);font-size:.78rem;">{_esc(dynasty)}</span>'
                             f'{badge}</div>',
                             unsafe_allow_html=True
                         )
@@ -3433,8 +3433,8 @@ def _family_links_tab(uid):
                     with c1:
                         st.markdown(
                             f'<div class="rel-chip">{mini_av}'
-                            f'<span class="rel-type">{rel}</span>'
-                            f'<span>{name}</span>{badge}</div>',
+                            f'<span class="rel-type">{_esc(rel)}</span>'
+                            f'<span>{_esc(name)}</span>{badge}</div>',
                             unsafe_allow_html=True
                         )
                     with c2:
