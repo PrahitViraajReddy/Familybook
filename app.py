@@ -1865,22 +1865,25 @@ def _build_tree_data(uid):
         for a, b in pairs:
             # For gen -1, the JS parent section expects the couple as a parent
             # couple. For lower generations we also store their specific child.
-            child_nid = None
+            child_nids = []
             if gen_level < -1:
                 child_candidates = by_gen.get(gen_level + 1, [])
                 for child in child_candidates:
                     cu = nodes[child].get("uid")
                     if not cu:
                         continue
-                    if is_parent_edge(nodes[a].get("uid"), cu) or is_parent_edge(nodes[b].get("uid"), cu):
-                        child_nid = child
-                        break
+                    if (
+                        is_parent_edge(nodes[a].get("uid"), cu)
+                        or is_parent_edge(nodes[b].get("uid"), cu)
+                    ):
+                        child_nids.append(child)
 
             ancestor_couples.append({
                 "nid_a": a,
                 "nid_b": b,
                 "gen": gen_level,
-                "child_nid": child_nid,
+                "child_nid": child_nids[0] if child_nids else None,
+                "child_nids": child_nids,
                 "isSibPil": False,
             })
             ancestor_coupled.update((a, b))
@@ -2200,6 +2203,7 @@ def _build_tree_data(uid):
             "nid_b": ac["nid_b"],
             "gen": ac["gen"],
             "child_nid": ac.get("child_nid"),
+            "child_nids": ac.get("child_nids", []),
             "isSibPil": ac.get("isSibPil", False),
         }
         for ac in ancestor_couples
@@ -2631,36 +2635,29 @@ function drawEdges(){{
     const adjNodes = Object.values(NODES).filter(p=>p.gen===adjGen);
     if(!adjNodes.length) continue;
 
-    // Use the specific blood child if known; otherwise fall back to nearest
-    const target = (ac.child_nid && NODES[ac.child_nid])
-      ? NODES[ac.child_nid]
-      : adjNodes.reduce((a,b)=>
-          Math.abs(a.x-unionX) <= Math.abs(b.x-unionX) ? a : b
-        );
-    elbow(unionX, unionY+NH/2, target.x, target.y-NH/2, gc(ac.gen)+'bb');
-
-    // The user's parent may have siblings on the same generation.
-    // They are children of the same grandparent couple, NOT children of
-    // Father/Mother. Connect those blood-side siblings to the same union.
-    const sideSiblingRels = {{
-      'Father': new Set(['Paternal Uncle','Elder Paternal Uncle','Paternal Aunt']),
-      'Stepfather': new Set(['Paternal Uncle','Elder Paternal Uncle','Paternal Aunt']),
-      'Mother': new Set(['Maternal Uncle','Maternal Aunt']),
-      'Stepmother': new Set(['Maternal Uncle','Maternal Aunt'])
-    }};
-    const childRel = target.relation;
-    const siblingRels = sideSiblingRels[childRel];
-    if(siblingRels){{
-      const sideSiblings = Object.values(NODES).filter(
-        n => n.gen===-1 && siblingRels.has(n.relation)
-      );
-      for(const sib of sideSiblings){{
+    // Connect the grandparent couple to EVERY proven child in the
+    // next generation. This is the actual family graph: Father, Uncle,
+    // Aunt, etc. are siblings because they all have a parent edge to the
+    // same grandparent couple. Never infer this from relation-name buckets.
+    const provenChildIds = Array.isArray(ac.child_nids)
+      ? ac.child_nids.filter(id => NODES[id])
+      : [];
+    if(provenChildIds.length){{
+      for(const child of provenChildIds){{
         elbow(
           unionX, unionY+NH/2,
-          sib.x, sib.y-NH/2,
-          gc(ac.gen)+'88'
+          child.x, child.y-NH/2,
+          gc(ac.gen)+'bb'
         );
       }}
+    }} else {{
+      // Backward-compatible fallback for older metadata.
+      const target = (ac.child_nid && NODES[ac.child_nid])
+        ? NODES[ac.child_nid]
+        : adjNodes.reduce((a,b)=>
+            Math.abs(a.x-unionX) <= Math.abs(b.x-unionX) ? a : b
+          );
+      elbow(unionX, unionY+NH/2, target.x, target.y-NH/2, gc(ac.gen)+'bb');
     }}
   }}
 
