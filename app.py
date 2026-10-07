@@ -1804,6 +1804,12 @@ def _build_tree_data(uid):
         # primary source and keep their original relationship labels.
         links = list(links) + discovered
 
+        # IMPORTANT: owner_links are the actual database edges that caused
+        # the sibling branch to be discovered (e.g. Grandfather -> Uncle).
+        # They must also enter the graph edge map; otherwise the Uncle node
+        # appears visually but has no parent edge.
+        network_links = list(network_links) + owner_links
+
         # Spouse rows for newly discovered relatives were not part of the
         # original network query, so include them in the relationship edge
         # graph as well. This lets actual Aunt↔Fufaji / Uncle↔Chachi edges
