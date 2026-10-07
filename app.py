@@ -2629,11 +2629,11 @@ function drawEdges(){{
     n => n.gen===-1 && (SIDE_TO_PARENT.has(n.relation) || SPOUSE_SIDE_RELATIONS.has(n.relation))
   );
 
-  const findSideBloodPartner = (side) => {
+  const findSideBloodPartner = (side) => {{
     if(!side.spouseId || !NODES[side.spouseId]) return null;
     const sp = NODES[side.spouseId];
     return SIDE_TO_PARENT.has(sp.relation) ? sp : null;
-  };
+  }};
 
   let sideConnectorIndex = 0;
   for(const side of sideNodes){{
