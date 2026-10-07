@@ -2609,62 +2609,77 @@ function drawEdges(){{
   }}
 
   // ── 3c. Parent-side relatives ──────────────────────────────────────────
-  // Father's siblings belong to the paternal side; Mother's siblings belong
-  // to the maternal side. They are NOT additional parents of the current user.
+  // Blood-side relatives connect to the correct parent. Their spouses connect
+  // to the blood relative, not directly to Father/Mother.
   const SIDE_TO_PARENT = new Map([
     ['Paternal Uncle', ['Father','Stepfather']],
     ['Elder Paternal Uncle', ['Father','Stepfather']],
     ['Paternal Aunt', ['Father','Stepfather']],
-    ["Paternal Aunt's Husband", ['Father','Stepfather']],
-    ["Paternal Uncle's Wife", ['Father','Stepfather']],
     ['Maternal Uncle', ['Mother','Stepmother']],
-    ['Maternal Aunt', ['Mother','Stepmother']],
-    ["Maternal Uncle's Wife", ['Mother','Stepmother']],
-    ["Maternal Aunt's Husband", ['Mother','Stepmother']]
+    ['Maternal Aunt', ['Mother','Stepmother']]
   ]);
-  const sideNodes = Object.values(NODES).filter(
-    n => n.gen===-1 && SIDE_TO_PARENT.has(n.relation)
-  );
-  const sideDone = new Set();
+  const SPOUSE_SIDE_RELATIONS = new Set([
+    "Paternal Aunt's Husband",
+    "Paternal Uncle's Wife",
+    "Maternal Uncle's Wife",
+    "Maternal Aunt's Husband"
+  ]);
 
+  const sideNodes = Object.values(NODES).filter(
+    n => n.gen===-1 && (SIDE_TO_PARENT.has(n.relation) || SPOUSE_SIDE_RELATIONS.has(n.relation))
+  );
+
+  const findSideBloodPartner = (side) => {
+    if(!side.spouseId || !NODES[side.spouseId]) return null;
+    const sp = NODES[side.spouseId];
+    return SIDE_TO_PARENT.has(sp.relation) ? sp : null;
+  };
+
+  let sideConnectorIndex = 0;
   for(const side of sideNodes){{
-    if(sideDone.has(side.id)) continue;
+    // Spouses of uncles/aunts attach to that exact blood relative.
+    if(SPOUSE_SIDE_RELATIONS.has(side.relation)){{
+      const blood = findSideBloodPartner(side);
+      if(!blood) continue;
+
+      const x1 = blood.x;
+      const x2 = side.x;
+      const y1 = blood.y + NH/2;
+      const y2 = side.y + NH/2;
+
+      // Marriage edge only; the actual side-to-parent edge is drawn from the
+      // blood relative below.
+      const m = svgEl('line');
+      m.setAttribute('x1',x1); m.setAttribute('y1',y1);
+      m.setAttribute('x2',x2); m.setAttribute('y2',y2);
+      m.setAttribute('stroke',parentCol+'66'); m.setAttribute('stroke-width','1.6');
+      svg.appendChild(m);
+      continue;
+    }}
+
+    if(!SIDE_TO_PARENT.has(side.relation)) continue;
 
     const target = Object.values(NODES).find(
       p => p.gen===-1 && SIDE_TO_PARENT.get(side.relation).includes(p.relation)
     );
     if(!target) continue;
 
-    // If the side relative is married, draw the connector from the family
-    // unit midpoint so the uncle/aunt and spouse remain one visual unit.
-    let unitX = side.x;
-    let unitRight = side.x;
-    if(side.spouseId && NODES[side.spouseId]){{
-      const sp=NODES[side.spouseId];
-      unitX=(side.x+sp.x)/2;
-      unitRight=Math.max(side.x,sp.x);
-      sideDone.add(sp.id);
-    }}
-    sideDone.add(side.id);
-
-    const yBar = side.y + NH/2 + 24;
+    // Give each side family its own branch level. This prevents multiple
+    // uncles/aunts from merging into one fake parent T-bar.
+    const branchY = side.y + NH/2 + 20 + (sideConnectorIndex++ * 18);
+    const sideX = side.x;
     const targetX = target.x;
-    const minX = Math.min(targetX, unitX);
-    const maxX = Math.max(targetX, unitX);
 
-    const h=svgEl('line');
-    h.setAttribute('x1',minX); h.setAttribute('y1',yBar);
-    h.setAttribute('x2',maxX); h.setAttribute('y2',yBar);
-    h.setAttribute('stroke',parentCol+'66'); h.setAttribute('stroke-width','1.6');
-    svg.appendChild(h);
-
-    for(const x of [targetX, unitX]){{
-      const v=svgEl('line');
-      v.setAttribute('x1',x); v.setAttribute('y1',target.y+NH/2);
-      v.setAttribute('x2',x); v.setAttribute('y2',yBar);
-      v.setAttribute('stroke',parentCol+'66'); v.setAttribute('stroke-width','1.6');
-      svg.appendChild(v);
-    }}
+    const p = svgEl('path');
+    p.setAttribute(
+      'd',
+      `M${{sideX}},${{side.y+NH/2}} V${{branchY}} H${{targetX}} V${{target.y+NH/2}}`
+    );
+    p.setAttribute('stroke',parentCol+'66');
+    p.setAttribute('stroke-width','1.6');
+    p.setAttribute('fill','none');
+    p.setAttribute('stroke-linejoin','round');
+    svg.appendChild(p);
   }}
 
   // ── 4 & 5. Ancestors gen ≤ -2 ─────────────────────────────────────────────
