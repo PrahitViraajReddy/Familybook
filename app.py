@@ -2838,18 +2838,27 @@ function drawEdges(){{
     const adjGen = n.gen + 1;
     const adjNodes = Object.values(NODES).filter(p=>p.gen===adjGen);
     if(!adjNodes.length) continue;
-    // Try relation-based target first, fall back to nearest-X
+    // A single grandparent can have multiple children. Connect to every
+    // proven child, not only the nearest/first child.
     const relTargets = SINGLE_ANCESTOR_TARGET[n.relation];
-    let target = null;
-    if(relTargets){{
-      target = adjNodes.find(p=>relTargets.has(p.relation)) || null;
-    }}
-    if(!target){{
-      target = adjNodes.reduce((a,b)=>
+    const provenTargets = relTargets
+      ? adjNodes.filter(p=>relTargets.has(p.relation))
+      : [];
+
+    if(provenTargets.length){{
+      for(const target of provenTargets){{
+        elbow(
+          n.x, n.y+NH/2,
+          target.x, target.y-NH/2,
+          gc(n.gen)+'bb'
+        );
+      }}
+    }} else {{
+      const target = adjNodes.reduce((a,b)=>
         Math.abs(a.x-n.x) <= Math.abs(b.x-n.x) ? a : b
       );
+      elbow(n.x, n.y+NH/2, target.x, target.y-NH/2, gc(n.gen)+'bb');
     }}
-    elbow(n.x, n.y+NH/2, target.x, target.y-NH/2, gc(n.gen)+'bb');
   }}
 
   // ── 5b. Sister's/Brother's parents-in-law → connect down to BIL/Sister-in-law ──
