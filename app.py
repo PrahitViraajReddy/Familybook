@@ -1563,6 +1563,16 @@ def _build_tree_data(uid):
     SIBLING_RELS = {"Brother", "Sister", "Stepbrother", "Stepsister"}
     CHILD_RELS = {"Son", "Daughter", "Stepson", "Stepdaughter"}
     PARENT_RELS = {"Father", "Mother", "Stepfather", "Stepmother"}
+    ANCESTOR_PARENT_RELS = PARENT_RELS | {
+        "Paternal Grandfather", "Paternal Grandmother",
+        "Maternal Grandfather", "Maternal Grandmother",
+        "Great-grandfather", "Great-grandmother",
+        "Paternal Great-grandfather", "Paternal Great-grandmother",
+        "Maternal Great-grandfather", "Maternal Great-grandmother",
+    }
+    DESCENDANT_CHILD_RELS = CHILD_RELS | {
+        "Grandson", "Granddaughter", "Great-grandson", "Great-granddaughter"
+    }
     NIECE_NEPHEW = {"Niece", "Nephew"}
     SIB_PIL_RELS = {
         "Sister's Father-in-law", "Sister's Mother-in-law",
@@ -1714,7 +1724,7 @@ def _build_tree_data(uid):
         # reciprocal row. Do not infer from gender alone.
         a = relation_between(child_uid, parent_uid)
         b = relation_between(parent_uid, child_uid)
-        return a in PARENT_RELS or b in CHILD_RELS
+        return a in ANCESTOR_PARENT_RELS or b in DESCENDANT_CHILD_RELS
 
     def pair_actual_spouses(candidate_nids):
         """Return real spouse pairs; never pair two people merely by category."""
