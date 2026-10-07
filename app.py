@@ -2398,7 +2398,12 @@ def _build_family_graph(uid, max_hops=5):
     """
     root_id = int(uid)
 
-    spouse_rels = {"Husband", "Wife", "Partner"}
+    spouse_rels = {
+        "Husband", "Wife", "Partner",
+        "Paternal Uncle's Wife", "Paternal Aunt's Husband",
+        "Maternal Uncle's Wife", "Maternal Aunt's Husband",
+        "Brother's Wife", "Nephew's Wife", "Niece's Husband",
+    }
     child_rels = {"Son", "Daughter", "Stepson", "Stepdaughter",
                   "Grandson", "Granddaughter", "Great-grandson", "Great-granddaughter"}
     parent_rels = {"Father", "Mother", "Stepfather", "Stepmother",
@@ -2538,6 +2543,19 @@ def _build_family_graph(uid, max_hops=5):
             add_edge(b, a, "parent", rel)
         elif rel in {"Brother", "Sister", "Stepbrother", "Stepsister"}:
             add_edge(a, b, "sibling", rel)
+
+    # If two people have the same recorded parent, they are siblings even when
+    # no explicit Brother/Sister link was stored between them. This is derived
+    # from real parent facts; it does not invent a new person or parent.
+    parent_to_children = {}
+    for e in edges:
+        if e["kind"] == "parent":
+            parent_to_children.setdefault(e["source"], set()).add(e["target"])
+    for child_ids in parent_to_children.values():
+        child_ids = list(child_ids)
+        for i in range(len(child_ids)):
+            for j in range(i + 1, len(child_ids)):
+                add_edge(child_ids[i], child_ids[j], "sibling", "Shared parent")
 
     # Direct relationship labels are authoritative for the current user.
     direct = {}
