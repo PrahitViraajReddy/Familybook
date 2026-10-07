@@ -2595,7 +2595,25 @@ function drawEdges(){{
     const target = targets.reduce((a,b)=>
       Math.abs(a.x-side.x) <= Math.abs(b.x-side.x) ? a : b
     );
-    elbow(target.x, target.y+NH/2, side.x, side.y-NH/2, parentCol+'77');
+
+    // Same-generation relatives get a sibling-style bar below the cards,
+    // avoiding a diagonal/vertical line through the nodes.
+    const y = target.y + NH/2 + 22;
+    const x1 = Math.min(target.x, side.x);
+    const x2 = Math.max(target.x, side.x);
+    const h = svgEl('line');
+    h.setAttribute('x1', x1); h.setAttribute('y1', y);
+    h.setAttribute('x2', x2); h.setAttribute('y2', y);
+    h.setAttribute('stroke', parentCol+'77'); h.setAttribute('stroke-width','1.6');
+    svg.appendChild(h);
+
+    for(const x of [target.x, side.x]){
+      const v = svgEl('line');
+      v.setAttribute('x1', x); v.setAttribute('y1', target.y+NH/2);
+      v.setAttribute('x2', x); v.setAttribute('y2', y);
+      v.setAttribute('stroke', parentCol+'77'); v.setAttribute('stroke-width','1.6');
+      svg.appendChild(v);
+    }
   }
 
   // ── 4 & 5. Ancestors gen ≤ -2 ─────────────────────────────────────────────
