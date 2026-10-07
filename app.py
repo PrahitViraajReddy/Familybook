@@ -1836,8 +1836,29 @@ def _build_tree_data(uid):
     ancestor_couples = []
     ancestor_coupled = set()
 
+    ANCESTOR_RELS_BY_GEN = {
+        -1: PARENT_RELS,
+        -2: {
+            "Paternal Grandfather", "Paternal Grandmother",
+            "Maternal Grandfather", "Maternal Grandmother",
+        },
+        -3: {
+            "Great-grandfather", "Great-grandmother",
+            "Paternal Great-grandfather", "Paternal Great-grandmother",
+            "Maternal Great-grandfather", "Maternal Great-grandmother",
+        },
+    }
+
     for gen_level in sorted([g for g in by_gen if g < 0], reverse=True):
-        gen_nids = by_gen[gen_level]
+        # Only actual ancestors participate in the ancestor/parent chain.
+        # Aunts, uncles and their spouses may share gen -1 visually, but they
+        # are side relatives and must never be connected to the current user
+        # as parents.
+        allowed_ancestor = ANCESTOR_RELS_BY_GEN.get(gen_level, set())
+        gen_nids = [
+            nid for nid in by_gen[gen_level]
+            if nodes[nid].get("relation") in allowed_ancestor
+        ]
         pairs = pair_actual_spouses(gen_nids)
 
         for a, b in pairs:
@@ -2432,7 +2453,12 @@ function drawEdges(){{
   const bloodNodes = bloodIds.map(id=>NODES[id]).filter(Boolean);
   const SIB_PIL = new Set(["Sister's Father-in-law","Sister's Mother-in-law",
                             "Brother's Father-in-law","Brother's Mother-in-law"]);
-  const parentNodes= Object.values(NODES).filter(n=>n.gen===-1 && !SIB_PIL.has(n.relation));
+  const TRUE_PARENT_RELS = new Set([
+    'Father','Mother','Stepfather','Stepmother'
+  ]);
+  const parentNodes= Object.values(NODES).filter(
+    n=>n.gen===-1 && TRUE_PARENT_RELS.has(n.relation) && !SIB_PIL.has(n.relation)
+  );
   const parentCol  = gc(-1);
 
   // Partition parent nodes into coupled vs single
@@ -2542,6 +2568,35 @@ function drawEdges(){{
       }}
     }}
   }}
+
+  // ── 3c. Parent-generation side relatives ────────────────────────────────
+  // Paternal/Maternal uncles and aunts are siblings of Father/Mother, not
+  // additional parents of the current user. Connect them to the correct
+  // parent branch instead of sending them into the parent union.
+  const SIDE_REL_TARGETS = {
+    'Paternal Uncle': new Set(['Father','Stepfather']),
+    'Elder Paternal Uncle': new Set(['Father','Stepfather']),
+    'Paternal Aunt': new Set(['Father','Stepfather']),
+    'Paternal Uncle\'s Wife': new Set(['Father','Stepfather']),
+    'Paternal Aunt\'s Husband': new Set(['Father','Stepfather']),
+    'Maternal Uncle': new Set(['Mother','Stepmother']),
+    'Maternal Aunt': new Set(['Mother','Stepmother']),
+    'Maternal Uncle\'s Wife': new Set(['Mother','Stepmother']),
+    'Maternal Aunt\'s Husband': new Set(['Mother','Stepmother'])
+  };
+  const sideRelNodes = Object.values(NODES).filter(
+    n => n.gen===-1 && SIDE_REL_TARGETS[n.relation]
+  );
+  for(const side of sideRelNodes){
+    const targets = Object.values(NODES).filter(
+      p => p.gen===-1 && SIDE_REL_TARGETS[side.relation].has(p.relation)
+    );
+    if(!targets.length) continue;
+    const target = targets.reduce((a,b)=>
+      Math.abs(a.x-side.x) <= Math.abs(b.x-side.x) ? a : b
+    );
+    elbow(target.x, target.y+NH/2, side.x, side.y-NH/2, parentCol+'77');
+  }
 
   // ── 4 & 5. Ancestors gen ≤ -2 ─────────────────────────────────────────────
   //
