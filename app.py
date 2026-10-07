@@ -2001,14 +2001,29 @@ def _build_tree_data(uid):
         union_sib_x = union_you_x
 
     # ── PASS 2: Generation +1 ────────────────────────────────────────────────
+    # Build descendant groups defensively. A direct Son/Daughter relation
+    # is unambiguously a child of the current user unless graph evidence has
+    # already assigned that person to a different proven union.
     you_children = [
         nid for nid, n in nodes.items()
         if n.get("parentUnionKey") == "union_you"
+        or (
+            n.get("parentUnionKey") is None
+            and n.get("relation") in CHILD_RELS
+        )
     ]
     sib_children = [
         nid for nid, n in nodes.items()
         if n.get("parentUnionKey") == "union_sib"
+        and nid not in you_children
     ]
+
+    # Persist the fallback assignment so both layout and JS use the same
+    # relationship decision.
+    for nid in you_children:
+        nodes[nid]["parentUnionKey"] = "union_you"
+    for nid in sib_children:
+        nodes[nid]["parentUnionKey"] = "union_sib"
 
     def place_group_under(nids, center_x, y):
         if not nids:
