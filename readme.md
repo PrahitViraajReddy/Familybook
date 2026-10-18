@@ -6,7 +6,7 @@
 
 <p>
   <a href="https://familybook-7ff4.onrender.com/"><img alt="Live App" src="https://img.shields.io/badge/Live%20App-Visit-2ea44f?style=flat-square"></a>
-  <img alt="Python" src="https://img.shields.io/badge/Python-3.x-3776AB?style=flat-square&logo=python&logoColor=white">
+  <img alt="Python 3.14" src="https://img.shields.io/badge/Python-3.14-3776AB?style=flat-square&logo=python&logoColor=white">
   <img alt="Streamlit" src="https://img.shields.io/badge/UI-Streamlit-FF4B4B?style=flat-square&logo=streamlit&logoColor=white">
   <img alt="PostgreSQL" src="https://img.shields.io/badge/Database-PostgreSQL-4169E1?style=flat-square&logo=postgresql&logoColor=white">
   <img alt="License" src="https://img.shields.io/badge/License-Not%20specified-lightgrey?style=flat-square">
@@ -60,7 +60,7 @@ The Streamlit application handles the user interface and application workflows. 
 
 | Layer | Technology |
 |---|---|
-| Language | Python |
+| Language | Python 3.14 |
 | Web interface | Streamlit |
 | Relational database | PostgreSQL |
 | Database hosting | Supabase |
@@ -89,6 +89,16 @@ The application uses relational tables for the main parts of the family platform
 Foreign keys help maintain relationships between related records. Delete behavior is defined at the database level where applicable.
 
 ## Quick start
+
+**Python version:** Use Python **3.14** for this project.
+
+Check your installed version:
+
+```bash
+python --version
+```
+
+The output should begin with `Python 3.14`.
 
 ### 1. Clone the repository
 
