@@ -33,7 +33,13 @@ from contextlib import contextmanager
 import os
 
 # Try st.secrets first (local / Streamlit Cloud), fallback to env var (Render)
-POSTGRES_URI = st.secrets.get("POSTGRES_URI") or os.environ.get("POSTGRES_URI")
+# Prefer Render's environment variable; st.secrets may raise when no secrets.toml exists.
+POSTGRES_URI = os.environ.get("POSTGRES_URI")
+if not POSTGRES_URI:
+    try:
+        POSTGRES_URI = st.secrets.get("POSTGRES_URI")
+    except (FileNotFoundError, KeyError):
+        POSTGRES_URI = None
 
 if not POSTGRES_URI:
     st.error("❌ POSTGRES_URI not set. Add it to .streamlit/secrets.toml or as an environment variable.")
